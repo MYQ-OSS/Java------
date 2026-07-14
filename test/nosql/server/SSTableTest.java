@@ -127,60 +127,53 @@ class SSTableTest {
     }
 
     @Test
-    @DisplayName("compact: 压缩合并多个 SSTable")
+    @DisplayName("compact: 压缩合并多个 SSTable，重复 key 取最新值")
     void testCompact(@TempDir Path tempDir) throws Exception {
         File dir = tempDir.toFile();
         HashIndex hashIndex = new HashIndex();
         Engine engine = new Engine(dir, 10000);
 
-        // 创建第 1 个 SSTable
+        // 使用 LinkedHashMap 保证插入顺序
         Map<String, Object> data1 = new LinkedHashMap<>();
         data1.put("a", "1");
         data1.put("b", "2");
         File f1 = SSTable.flush(dir, data1, engine, hashIndex);
+        assertNotNull(f1);
+        assertEquals(2, SSTable.readAll(f1).size());
 
-        // 创建第 2 个 SSTable（覆盖 b，新增 c）
         Map<String, Object> data2 = new LinkedHashMap<>();
         data2.put("b", "updated");
         data2.put("c", "3");
         File f2 = SSTable.flush(dir, data2, engine, hashIndex);
+        assertNotNull(f2);
+        assertEquals(2, SSTable.readAll(f2).size());
 
-        // 等待 10ms 确保 compact 生成的文件不会与源文件时间戳冲突
-        Thread.sleep(10);
+        // 验证源文件独立可读
+        assertEquals("1", SSTable.read(f1, "a"));
+        assertEquals("2", SSTable.read(f1, "b"));
+        assertEquals("updated", SSTable.read(f2, "b"));
+        assertEquals("3", SSTable.read(f2, "c"));
 
-        // 先验证每个源文件的条目数
-        System.out.println("[TEST] f1 entries: " + SSTable.readAll(f1).size());
-        System.out.println("[TEST] f2 entries: " + SSTable.readAll(f2).size());
-
-        // 压缩
-        File compacted = SSTable.compact(dir, new ArrayList<>(List.of(f1, f2)), hashIndex);
+        // 压缩合并（f1 先创建 → 文件排序靠前 → 先读 → f2 覆盖同 key）
+        List<File> sources = new ArrayList<>();
+        sources.add(f1);
+        sources.add(f2);
+        File compacted = SSTable.compact(dir, sources, hashIndex);
         assertNotNull(compacted);
+        assertTrue(compacted.exists());
 
-        // 使用 readAll 验证压缩文件
-        List<SSTable.Entry> allEntries = SSTable.readAll(compacted);
-        System.out.println("[TEST] compacted entries: " + allEntries.size());
-        for (SSTable.Entry e : allEntries) {
-            System.out.println("[TEST]   key=" + e.key + " val=" + new String(e.value, java.nio.charset.StandardCharsets.UTF_8));
-        }
-        assertEquals(3, allEntries.size(), "Compacted SSTable should have 3 entries");
-
-        // 遍历找出每个 key 的值
-        String valA = null, valB = null, valC = null;
-        for (SSTable.Entry entry : allEntries) {
-            String v = new String(entry.value, java.nio.charset.StandardCharsets.UTF_8);
-            switch (entry.key) {
-                case "a": valA = v; break;
-                case "b": valB = v; break;
-                case "c": valC = v; break;
-            }
-        }
-        assertEquals("1", valA);
-        assertEquals("updated", valB);
-        assertEquals("3", valC);
-
-        // 源文件应被删除
+        // 压缩后源文件应被删除
         assertFalse(f1.exists());
         assertFalse(f2.exists());
+
+        // 压缩文件应包含 3 个不同的 key
+        List<SSTable.Entry> entries = SSTable.readAll(compacted);
+        assertEquals(3, entries.size(), "Compacted file should contain 3 distinct keys");
+
+        // 验证压缩后值正确（b 取 f2 的 updated）
+        assertEquals("1", SSTable.read(compacted, "a"));
+        assertEquals("updated", SSTable.read(compacted, "b"));
+        assertEquals("3", SSTable.read(compacted, "c"));
     }
 
     @Test

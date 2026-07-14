@@ -10,6 +10,7 @@ src/nosql/server/Database.java
 src/nosql/server/DatabaseServer.java
 src/nosql/server/Engine.java
 src/nosql/server/HashIndex.java
+src/nosql/server/L2Cache.java
 src/nosql/server/LruCache.java
 src/nosql/server/RestfulDispatcher.java
 src/nosql/server/SSTable.java
