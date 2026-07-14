@@ -8,9 +8,11 @@ import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 兼容 Redis RESP 协议规范的 TCP 服务端主程序
+ * 集成了 RESTful 风格的命令调度器日志输出
  */
 public class DatabaseServer implements AutoCloseable {
 
@@ -18,6 +20,8 @@ public class DatabaseServer implements AutoCloseable {
     private final Database database;
     private final ClusterManager clusterManager;
     private final ExecutorService executor;
+    private final RestfulDispatcher restfulDispatcher;
+    private final AtomicInteger activeConnections = new AtomicInteger(0);
 
     private ServerSocket serverSocket;
     private volatile boolean running = true;
@@ -26,6 +30,7 @@ public class DatabaseServer implements AutoCloseable {
         this.port = port;
         this.database = new Database(dataDir, rotateThreshold);
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
+        this.restfulDispatcher = new RestfulDispatcher();
 
         if ("cluster".equalsIgnoreCase(mode)) {
             this.clusterManager = new ClusterManager(nodeId, port, peersStr, this.database);
@@ -45,10 +50,18 @@ public class DatabaseServer implements AutoCloseable {
         while (running) {
             try {
                 Socket socket = serverSocket.accept();
-                executor.submit(() -> handleClient(socket));
+                int connCount = activeConnections.incrementAndGet();
+                System.out.println("[Server] New connection accepted. Active connections: " + connCount);
+                executor.submit(() -> {
+                    try {
+                        handleClient(socket);
+                    } finally {
+                        activeConnections.decrementAndGet();
+                    }
+                });
             } catch (IOException e) {
                 if (!running) break;
-                e.printStackTrace();
+                System.err.println("[Server] Accept error: " + e.getMessage());
             }
         }
     }
@@ -67,6 +80,7 @@ public class DatabaseServer implements AutoCloseable {
                 } catch (EOFException e) {
                     break; // 客户端正常断开连接
                 } catch (IOException e) {
+                    System.err.println("[Server] Client read error: " + e.getMessage());
                     break;
                 }
 
@@ -77,20 +91,25 @@ public class DatabaseServer implements AutoCloseable {
                 String action = cmd.get(0).toUpperCase();
 
                 // ==========================================
+                // RESTful 风格路由日志打印
+                // ==========================================
+                restfulDispatcher.dispatch(cmd);
+
+                // ==========================================
                 // 1. 路由拦截集群特有命令 (CLUSTER_*)
                 // ==========================================
                 if ("CLUSTER_HEARTBEAT".equals(action)) {
                     if (clusterManager != null) {
                         clusterManager.handleHeartbeatPacket(cmd);
                     }
-                    continue; // 单向心跳，无需响应
+                    continue;
                 }
 
                 if ("CLUSTER_REPLICATE".equals(action)) {
                     if (clusterManager != null) {
                         clusterManager.handleReplicationPacket(cmd);
                     }
-                    continue; // 单向复制流，无需响应
+                    continue;
                 }
 
                 if ("CLUSTER_ELECT".equals(action)) {
@@ -112,8 +131,22 @@ public class DatabaseServer implements AutoCloseable {
                 // ==========================================
                 // 2. 路由常规 Redis 命令
                 // ==========================================
-                
-                // 写操作前置状态检查：Slave 节点禁止写入
+
+                // ════════════════════════════════════════════════════════
+                // 【冲突五】写操作发给 Follower 节点的冲突处理
+                //
+                // 场景：客户端连到 Follower 节点，执行 SET / DEL 等写命令
+                // 处理：直接拒绝，返回错误
+                //   "Operation rejected: Current node is not Cluster Master."
+                //
+                // 原理：集群中只有 Leader 能写数据。
+                //   Follower 不转发请求给 Leader（避免额外复杂度），
+                //   而是直接拒绝，让客户端自己知道要连 Leader。
+                //
+                // isWritable() 的实现在 ClusterManager：
+                //   单机模式 → true（允许写）
+                //   集群模式 → 只有 LEADER 返回 true
+                // ════════════════════════════════════════════════════════
                 if (isWriteOp(action)) {
                     if (clusterManager != null && !clusterManager.isWritable()) {
                         RespParser.writeError(out, "Operation rejected: Current node is not Cluster Master.");
@@ -130,7 +163,7 @@ public class DatabaseServer implements AutoCloseable {
                 }
             }
         } catch (Exception e) {
-            // 异常捕获，正常记录
+            System.err.println("[Server] Connection error: " + e.getMessage());
         } finally {
             try {
                 socket.close();
@@ -138,8 +171,9 @@ public class DatabaseServer implements AutoCloseable {
         }
     }
 
-    private boolean isWriteOp(String action) {
-        switch (action) {
+    private boolean isWriteOp(String cmd) {
+        if ("CREATE".equalsIgnoreCase(cmd) || "DROP".equalsIgnoreCase(cmd)) return true;
+        switch (cmd.toUpperCase()) {
             case "SET":
             case "DEL":
             case "EXPIRE":
@@ -153,6 +187,7 @@ public class DatabaseServer implements AutoCloseable {
             case "RPOP":
             case "SADD":
             case "SREM":
+            case "MSET":
             case "FLUSHALL":
                 return true;
             default:
@@ -165,6 +200,12 @@ public class DatabaseServer implements AutoCloseable {
      */
     @SuppressWarnings("unchecked")
     private void sendRespResponse(OutputStream out, Object result) throws IOException {
+        // 处理 ErrorResult 包装的错误
+        if (result instanceof Database.ErrorResult) {
+            RespParser.writeError(out, ((Database.ErrorResult) result).getMessage());
+            return;
+        }
+
         if (result == null) {
             RespParser.writeNullBulkString(out);
         } else if (result instanceof String) {
@@ -232,7 +273,7 @@ public class DatabaseServer implements AutoCloseable {
         }
 
         System.out.println("[System] Launching Redis-compatible database server in " + mode.toUpperCase() + " mode...");
-        
+
         try (DatabaseServer server = new DatabaseServer(port, mode, nodeId, peersStr, dataDir, rotateThreshold)) {
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 System.out.println("[System] Shutdown hook triggered. Safely closing database resources...");

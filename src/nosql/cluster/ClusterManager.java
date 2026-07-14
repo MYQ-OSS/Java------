@@ -12,41 +12,87 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 集群模式管理器，负责多节点心跳、简化版 Raft 选主与主从同步（全部基于标准 RESP 协议通信）
+ *
+ * ============================================================
+ * 本文件处理的集群冲突（共 4 种）：
+ * ============================================================
+ *
+ * 【冲突一】多个节点同时想当 Leader（选举冲突）
+ *   处理位置：
+ *     - resetElectionTimeout()   → 随机超时 1500~3000ms，避免同时触发选举
+ *     - handleElectionPacket()   → 同一 term 内只投一票（先到先得）
+ *     - startElection()          → 获得过半数票才晋升 Leader
+ *
+ * 【冲突二】脑裂（网络分区导致两个 Leader 同时存在）
+ *   处理位置：
+ *     - startElection()          → votesNeeded = (peers+1)/2 + 1，孤立节点永远拿不到过半数票
+ *
+ * 【冲突三】旧 Leader 复活（两个不同 term 的 Leader 同时发心跳）
+ *   处理位置：
+ *     - handleHeartbeatPacket()  → term 比较：term < currentTerm 的心跳被忽略，旧 Leader 自动降级
+ *
+ * 【冲突七】新节点加入时数据和 Leader 不一致
+ *   处理位置：
+ *     - joinAndSyncData()        → 新节点主动发 CLUSTER_SYNC 请求全量快照
+ *     - handleSyncJoinRequest()  → Leader 遍历所有数据生成快照返回
+ *
+ * 【冲突六（已知未处理）】Leader 刚写完就崩溃，数据未同步到 Follower
+ *   位置：
+ *     - broadcastReplication()   → 使用 CompletableFuture.runAsync 异步广播，不等待 Follower 确认
+ *   说明：这是简化版 Raft 的取舍——追求性能，牺牲强一致性。真正的 Raft 需要等过半 Follower 确认。
+ * ============================================================
+ *
+ * 集群中另外两个冲突在其他文件中处理：
+ *
+ * 【冲突四】两个客户端同时写同一 Key → Database.java 的 synchronized execute()
+ * 【冲突五】写操作发给 Follower 节点 → DatabaseServer.java 的 isWritable() 检查
  */
 public class ClusterManager implements Closeable {
 
+    // ============================================================
+    // 节点角色枚举（Raft 状态机）
+    // ============================================================
     public enum Role {
-        FOLLOWER, CANDIDATE, LEADER
+        FOLLOWER,   // 从节点：只读，接收 Leader 复制，监控心跳
+        CANDIDATE,  // 候选者：发起选举，向其他节点拉票
+        LEADER      // 主节点：处理写请求，广播心跳，复制数据给 Follower
     }
 
     private final String nodeId;
     private final int port;
-    private final Map<String, String> peers; // nodeId -> "ip:port"
+    private final Map<String, String> peers; // nodeId -> "ip:port"（不包含自己）
     private final Database database;
 
+    // ============================================================
+    // Raft 核心状态变量
+    // ============================================================
     private Role currentRole = Role.FOLLOWER;
-    private int currentTerm = 0;
-    private String votedFor = null;
-    private String leaderId = null;
+    private int currentTerm = 0;        // 当前任期号，Raft 协议的核心，term 大的优先
+    private String votedFor = null;     // 当前 term 内投票给了谁（null 表示还没投票）
+    private String leaderId = null;     // 当前已知的 Leader 节点 ID
 
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
-    private ScheduledFuture<?> electionTimeoutTask;
-    private ScheduledFuture<?> heartbeatTask;
+    private ScheduledFuture<?> electionTimeoutTask;  // 选举超时检测定时任务
+    private ScheduledFuture<?> heartbeatTask;        // Leader 心跳广播定时任务
 
     private final Random random = new Random();
-    private long lastHeartbeatTime;
+    private long lastHeartbeatTime;  // 上次收到 Leader 心跳的时间戳
 
     public ClusterManager(String nodeId, int port, String peersStr, Database database) {
         this.nodeId = nodeId;
         this.port = port;
         this.database = database;
         this.peers = new ConcurrentHashMap<>();
-        
+
         parsePeers(peersStr);
         this.lastHeartbeatTime = System.currentTimeMillis();
         this.database.setClusterRole("FOLLOWER");
-        
+
+        // ============================================================
         // 绑定主节点写指令复制监听器
+        // 当 Database.execute() 执行完一条写命令后，会回调这个 Listener
+        // Leader 收到回调 → broadcastReplication() → 异步发给所有 Follower
+        // ============================================================
         this.database.setReplicationListener(cmd -> {
             if (currentRole == Role.LEADER) {
                 broadcastReplication(cmd);
@@ -54,6 +100,11 @@ public class ClusterManager implements Closeable {
         });
     }
 
+    /**
+     * 解析集群节点配置字符串
+     * 格式: "node_1=127.0.0.1:8081,node_2=127.0.0.1:8082,node_3=127.0.0.1:8083"
+     * 过滤掉自己，只保留其他节点到 peers Map 中
+     */
     private void parsePeers(String peersStr) {
         if (peersStr == null || peersStr.trim().isEmpty()) {
             return;
@@ -64,7 +115,8 @@ public class ClusterManager implements Closeable {
             if (kv.length == 2) {
                 String peerId = kv[0].trim();
                 String address = kv[1].trim();
-                // 过滤当前节点自己，确保选票过半数基数计算正确且避免自连
+                // 把自己的 ID 过滤掉，peers 只存其他节点
+                // 这样 votesNeeded = (peers.size() + 1) / 2 + 1 的计算才是正确的
                 if (!peerId.equals(nodeId)) {
                     peers.put(peerId, address);
                 }
@@ -72,53 +124,107 @@ public class ClusterManager implements Closeable {
         }
     }
 
+    /**
+     * 启动集群管理器
+     * 1. 开始选举超时检测
+     * 2. 1.2 秒后向已有节点请求全量数据同步
+     */
     public void start() {
         System.out.println("[Cluster] Node " + nodeId + " starting in cluster mode...");
         resetElectionTimeout();
         scheduler.schedule(this::joinAndSyncData, 1200, TimeUnit.MILLISECONDS);
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 冲突一 处理：多个节点同时想当 Leader（选举冲突）
+    // 策略：随机超时 + 同一 term 只投一票 + 过半数晋升
+    // ════════════════════════════════════════════════════════════
+
+    /**
+     * 【冲突一】重置选举超时计时器
+     *
+     * 每次收到 Leader 心跳后调用此方法，重新开始随机倒计时。
+     *
+     * 关键设计：timeout = 1500 + random.nextInt(1500)
+     *   → 每个节点的超时时间在 1500ms ~ 3000ms 之间随机
+     *   → 3 个节点的超时几乎不可能完全相同
+     *   → 只有最早超时的那个节点会发起选举
+     *   → 避免了多个节点"同时"发起选举的冲突
+     *
+     * 如果没有这个随机化，3 个节点会在同一时刻超时、同时拉票，
+     * 可能导致选票分散、无人过半数，反复选举。
+     */
     private synchronized void resetElectionTimeout() {
         if (electionTimeoutTask != null) {
             electionTimeoutTask.cancel(true);
         }
         lastHeartbeatTime = System.currentTimeMillis();
-        long timeout = 1500 + random.nextInt(1500);
+        long timeout = 1500 + random.nextInt(1500); // 【冲突一】随机 1500~3000ms，避免同时选举
         electionTimeoutTask = scheduler.scheduleAtFixedRate(
-            this::checkElectionTimeout, 
-            timeout, 
-            timeout, 
+            this::checkElectionTimeout,
+            timeout,
+            timeout,
             TimeUnit.MILLISECONDS
         );
     }
 
+    /**
+     * 【冲突一】定时检查是否选举超时
+     *
+     * 超过 3.5 秒没收到 Leader 心跳 → 认为 Leader 挂了 → 发起选举
+     * 如果当前节点已经是 Leader，则跳过（Leader 不需要检测超时）
+     */
     private synchronized void checkElectionTimeout() {
         if (currentRole == Role.LEADER) {
-            return;
+            return;  // 已经是 Leader，不需要检查
         }
         long now = System.currentTimeMillis();
-        if (now - lastHeartbeatTime > 3500) { 
+        if (now - lastHeartbeatTime > 3500) {  // 3.5 秒没收到心跳
             System.out.println("[Cluster] Heartbeat timeout. Initiating leader election...");
             startElection();
         }
     }
 
+    /**
+     * 【冲突一 + 冲突二】发起 Leader 选举
+     *
+     * 流程：
+     * ① 自己升级为 CANDIDATE，term+1
+     * ② 先投自己一票
+     * ③ 向所有 peer 发送 CLUSTER_ELECT REQUEST_VOTE 拉票
+     * ④ 收集选票，达到过半数 (peers+1)/2+1 就晋升 Leader
+     *
+     * 【冲突一 - 过半数机制】：
+     *   int votesNeeded = (peers.size() + 1) / 2 + 1;
+     *   3 节点：peers.size=2 → (2+1)/2+1 = 2 票
+     *   只有拿到 ≥2 票的候选者才能当选，确保了只有一个 Leader
+     *
+     * 【冲突二 - 防脑裂】：
+     *   如果 node_1 和 node_2/node_3 网络断开：
+     *     node_1 的 peers 有 2 个，但它只能投自己 = 1 票 < 2 → 选不上
+     *     node_2 和 node_3 能互相通信 → 互相投票 → 各得 2 票 → 当选
+     *   结论：被孤立的节点永远拿不到过半数票，阻止了脑裂
+     */
     private synchronized void startElection() {
         currentRole = Role.CANDIDATE;
         database.setClusterRole("CANDIDATE");
         currentTerm++;
-        votedFor = nodeId;
+        votedFor = nodeId;      // 先投自己一票
         leaderId = null;
         lastHeartbeatTime = System.currentTimeMillis();
-        
+
         System.out.println("[Cluster] Node " + nodeId + " becomes Candidate. Term: " + currentTerm);
 
+        // 【冲突一 + 冲突二】计算过半数阈值
+        // 3 节点集群：peers.size()=2 → (2+1)/2+1=2，需要 2 票
+        // 如果节点被孤立，只能拿到自己 1 票 < 2，选不上 → 防止脑裂
         int votesNeeded = (peers.size() + 1) / 2 + 1;
-        AtomicInteger voteCount = new AtomicInteger(1);
+        AtomicInteger voteCount = new AtomicInteger(1);  // 已投自己 1 票
 
         // 组装选票请求 RESP 命令：CLUSTER_ELECT REQUEST_VOTE <term> <candidateId>
         List<String> electCmd = List.of("CLUSTER_ELECT", "REQUEST_VOTE", String.valueOf(currentTerm), nodeId);
 
+        // 向所有 peer 并发拉票
         for (Map.Entry<String, String> entry : peers.entrySet()) {
             String peerId = entry.getKey();
             String address = entry.getValue();
@@ -130,6 +236,7 @@ public class ClusterManager implements Closeable {
                         if (term == currentTerm) {
                             int currentVotes = voteCount.incrementAndGet();
                             System.out.println("[Cluster] Received vote from " + peerId + ". Total votes: " + currentVotes);
+                            // 【冲突一 + 冲突二】票数达到过半数 → 晋升 Leader
                             if (currentVotes >= votesNeeded) {
                                 promoteToLeader();
                             }
@@ -140,27 +247,44 @@ public class ClusterManager implements Closeable {
         }
     }
 
+    /**
+     * 晋升为 Leader
+     * ① 角色切换为 LEADER
+     * ② 停止选举超时检测（Leader 不需要）
+     * ③ 启动心跳广播（每秒发一次，维持权威）
+     */
     private synchronized void promoteToLeader() {
         if (currentRole != Role.CANDIDATE) {
-            return;
+            return;  // 可能已经被其他线程晋升了，防止重复
         }
         currentRole = Role.LEADER;
         database.setClusterRole("LEADER");
         leaderId = nodeId;
         System.out.println("[Cluster] !!! Node " + nodeId + " is elected as LEADER for Term: " + currentTerm + " !!!");
-        
+
+        // Leader 不需要选举超时检测
         if (electionTimeoutTask != null) {
             electionTimeoutTask.cancel(true);
         }
 
+        // Leader 每秒广播心跳，告诉 Follower "我还活着，别选举"
         heartbeatTask = scheduler.scheduleAtFixedRate(
-            this::sendHeartbeats, 
-            0, 
-            1000, 
+            this::sendHeartbeats,
+            0,
+            1000,    // 每 1 秒发一次心跳
             TimeUnit.MILLISECONDS
         );
     }
 
+    /**
+     * Leader 定时广播心跳
+     *
+     * Follower 收到心跳后会：
+     *   ① 调用 handleHeartbeatPacket() → 更新 term + 设置 role=FOLLOWER
+     *   ② 调用 resetElectionTimeout() → 重置自己的选举计时器 → 推迟选举
+     *
+     * 如果 Leader 挂了 → 心跳停止 → Follower 3.5 秒后超时 → 发起新选举
+     */
     private synchronized void sendHeartbeats() {
         if (currentRole != Role.LEADER) {
             if (heartbeatTask != null) {
@@ -169,20 +293,37 @@ public class ClusterManager implements Closeable {
             return;
         }
 
-        // 组装心跳包 RESP 命令：CLUSTER_HEARTBEAT <nodeId> <term>
+        // 组装心跳包 RESP 命令：CLUSTER_HEARTBEAT <leaderNodeId> <term>
         List<String> hbCmd = List.of("CLUSTER_HEARTBEAT", nodeId, String.valueOf(currentTerm));
 
         for (String address : peers.values()) {
             CompletableFuture.runAsync(() -> {
                 try {
-                    sendCommandToPeer(address, hbCmd, false);
+                    sendCommandToPeer(address, hbCmd, false);  // false = 单向发送，不等回复
                 } catch (Exception ignored) {}
             });
         }
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 冲突一 + 冲突三 处理：接收选举请求 + 旧 Leader 降级
+    // ════════════════════════════════════════════════════════════
+
     /**
-     * 处理收到的选举选票指令
+     * 【冲突一】处理收到的选举投票请求
+     *
+     * 投票规则（Raft 核心）：
+     *   ① 如果对方的 term > 我的 term → 我退回到 FOLLOWER，清空旧票，更新 term
+     *   ② 如果对方的 term == 我的 term 且我还没投票 → 投票给他
+     *   ③ 如果对方的 term == 我的 term 且我已经投给了同一个人 → 再次确认
+     *   ④ 如果对方的 term < 我的 term → 拒绝（对方是过期的候选者）
+     *   ⑤ 如果同 term 内我已经投给了别人 → 拒绝（一 term 一票，先到先得）
+     *
+     * 【冲突三 - 旧 Leader 降级】：
+     *   如果收到的 term > currentTerm：
+     *     说明集群已经进入了新时代，有新的 Leader 被选出了
+     *     自己无论是旧 Leader 还是 CANDIDATE，都必须退回到 FOLLOWER
+     *     清空 votedFor，等待新 Leader 的心跳
      */
     public synchronized List<String> handleElectionPacket(List<String> cmd) {
         if (cmd.size() < 4) {
@@ -194,102 +335,182 @@ public class ClusterManager implements Closeable {
         String candidateId = cmd.get(3);
 
         if ("REQUEST_VOTE".equalsIgnoreCase(subType)) {
+            // 【冲突三】对方的 term 更大 → 我退回到 FOLLOWER，承认新时代
             if (term > currentTerm) {
                 currentTerm = term;
                 currentRole = Role.FOLLOWER;
                 database.setClusterRole("FOLLOWER");
-                votedFor = null;
+                votedFor = null;      // 清空旧票，新 term 可以重新投票
                 leaderId = null;
                 resetElectionTimeout();
             }
 
+            // 【冲突一】同 term + 还没投票（或已投给同一个人）→ 投票
+            // votedFor == null：还没投过票 → 投给他
+            // votedFor.equals(candidateId)：已经投给了他（重复请求）→ 再次确认
             if (term == currentTerm && (votedFor == null || votedFor.equals(candidateId))) {
                 votedFor = candidateId;
                 System.out.println("[Cluster] Granted vote to candidate: " + candidateId + " in term " + term);
                 return List.of("VOTE_GRANTED", String.valueOf(currentTerm));
             }
         }
+        // term 更小，或者同 term 已投给别人 → 拒绝
         return List.of("VOTE_REJECTED", String.valueOf(currentTerm));
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 冲突三 处理：接收心跳包 + 旧 Leader 自动降级
+    // ════════════════════════════════════════════════════════════
+
     /**
-     * 处理收到的心跳包
+     * 【冲突三】处理收到的心跳包 —— 旧 Leader 复活 / 多个 Leader 冲突
+     *
+     * 场景 1：node_1 是旧 Leader(term=1)，网络卡顿后恢复
+     *         但 node_2 已经是新 Leader(term=2)
+     *         node_1 继续发 term=1 的心跳
+     *         → term=1 < currentTerm=2 → 被忽略！旧 Leader 的消息无人理睬
+     *
+     * 场景 2：node_1(term=1) 是 Follower，收到新 Leader(term=2) 的心跳
+     *         → term=2 >= currentTerm=1 → 承认对方是 Leader，更新自己的状态
+     *         → 重置选举计时器，推迟自己的选举
+     *
+     * 场景 3：收到心跳的 term 大于当前 term
+     *         → 更新 currentTerm，承认新 Leader
+     *         → 如果自己之前是 CANDIDATE 或旧 LEADER → 自动降级为 FOLLOWER
+     *
+     * 关键：term 的比较是 Raft 区分"新旧"的核心机制
+     *   term 小的 = 过时的 → 消息被忽略
+     *   term 大的 = 新的权威 → 无条件承认
      */
     public synchronized void handleHeartbeatPacket(List<String> cmd) {
         if (cmd.size() < 3) return;
         String termLeader = cmd.get(1);
         int term = Integer.parseInt(cmd.get(2));
 
+        // 【冲突三】只有 term >= currentTerm 的心跳才被接受
+        // 旧 Leader (term 小) 的心跳直接忽略
         if (term >= currentTerm) {
             if (currentRole != Role.FOLLOWER || !termLeader.equals(leaderId) || term > currentTerm) {
                 System.out.println("[Cluster] Node " + nodeId + " follows Leader: " + termLeader + " for Term: " + term);
             }
+            // 【冲突三】自动降级为 FOLLOWER，承认新 Leader
             currentRole = Role.FOLLOWER;
             database.setClusterRole("FOLLOWER");
             currentTerm = term;
             leaderId = termLeader;
-            resetElectionTimeout();
+            resetElectionTimeout();  // 重置计时器，推迟自己的选举
         }
+        // else: term < currentTerm → 旧 Leader 的心跳，直接忽略
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 冲突六（已知未处理）：主从复制 —— 异步广播
+    // ════════════════════════════════════════════════════════════
+
     /**
-     * 处理从节点收到的同步复制数据写命令
+     * 【冲突六（已知未处理）】Follower 接收 Leader 复制来的写命令
+     *
+     * Leader 执行完写操作后 → broadcastReplication() → Follower 收到 → 此方法处理
+     * database.execute(subCmd, false):
+     *   subCmd = 去掉 CLUSTER_REPLICATE 前缀后的纯业务命令
+     *   false   = 本地执行，不写 AOF（Leader 已经写了），不再次广播（避免死循环）
      */
     public void handleReplicationPacket(List<String> cmd) throws Exception {
         if (cmd.size() < 2) return;
         // cmd.get(0) 为 CLUSTER_REPLICATE，后面跟着写命令列表（例如 ["SET", "name", "mayiqin"]）
         List<String> subCmd = cmd.subList(1, cmd.size());
-        database.execute(subCmd, false); // false 代表本地执行，不进行二次集群广播
+        database.execute(subCmd, false); // false = 本地执行，不进行二次集群广播，不写 AOF
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 冲突七 处理：新节点加入 → 全量数据同步
+    // ════════════════════════════════════════════════════════════
+
     /**
-     * 新从节点加入主节点，主节点反馈当前所有数据的初始化批量写命令快照
+     * 【冲突七】Leader 处理新节点加入的全量快照请求
+     *
+     * 新节点启动时，内存是空的，和 Leader 数据不一致。
+     * 新节点发送 CLUSTER_SYNC → Leader 收到 → 此方法生成全量快照返回。
+     *
+     * 快照格式：每条数据用 （SOH 控制字符）分隔字段
+     *   String: "SETkeyvalue[EXttl]"
+     *   List:   "RPUSHkeyitem" × N + "EXPIREkeyttl"
+     *   Set:    "SADDkeymember" × N + "EXPIREkeyttl"
+     *   Hash:   "HSETkeyfieldvalue" × N + "EXPIREkeyttl"
+     *
+     * 新节点收到快照后：engine.clear() → 逐条回放 → 数据完全一致
      */
     @SuppressWarnings("unchecked")
     public synchronized List<String> handleSyncJoinRequest() {
         System.out.println("[Cluster] Received snapshot sync request from follower.");
         List<String> snapshotCmds = new ArrayList<>();
         Engine engine = database.getEngine();
-        
-        // 扫描内存数据库，把当前的 String, List, Set, Hash 数据导出为特殊的带有分隔符的写操作命令
+
+        // 【冲突七】同步 Collection 元数据
+        for (String collName : engine.listCollections()) {
+            snapshotCmds.add("CREATECOLLECTION" + collName);
+        }
+
+        // 【冲突七】扫描内存数据库，把当前的 String, List, Set, Hash 数据导出快照
         for (String key : engine.keys()) {
             String type = engine.type(key);
             long ttl = engine.ttl(key);
-            
+
             if ("string".equals(type)) {
                 String val = engine.get(key);
                 if (val != null) {
                     if (ttl > 0) {
-                        snapshotCmds.add("SET\u0001" + key + "\u0001" + val + "\u0001EX\u0001" + ttl);
+                        snapshotCmds.add("SET" + key + "" + val + "EX" + ttl);
                     } else {
-                        snapshotCmds.add("SET\u0001" + key + "\u0001" + val);
+                        snapshotCmds.add("SET" + key + "" + val);
                     }
                 }
             } else if ("list".equals(type)) {
                 List<String> list = engine.lrange(key, 0, -1);
                 for (String item : list) {
-                    snapshotCmds.add("RPUSH\u0001" + key + "\u0001" + item);
+                    snapshotCmds.add("RPUSH" + key + "" + item);
                 }
-                if (ttl > 0) snapshotCmds.add("EXPIRE\u0001" + key + "\u0001" + ttl);
+                if (ttl > 0) snapshotCmds.add("EXPIRE" + key + "" + ttl);
             } else if ("set".equals(type)) {
                 Set<String> set = engine.smembers(key);
                 for (String item : set) {
-                    snapshotCmds.add("SADD\u0001" + key + "\u0001" + item);
+                    snapshotCmds.add("SADD" + key + "" + item);
                 }
-                if (ttl > 0) snapshotCmds.add("EXPIRE\u0001" + key + "\u0001" + ttl);
+                if (ttl > 0) snapshotCmds.add("EXPIRE" + key + "" + ttl);
             } else if ("hash".equals(type)) {
                 Map<String, String> map = engine.hgetall(key);
                 for (Map.Entry<String, String> entry : map.entrySet()) {
-                    snapshotCmds.add("HSET\u0001" + key + "\u0001" + entry.getKey() + "\u0001" + entry.getValue());
+                    snapshotCmds.add("HSET" + key + "" + entry.getKey() + "" + entry.getValue());
                 }
-                if (ttl > 0) snapshotCmds.add("EXPIRE\u0001" + key + "\u0001" + ttl);
+                if (ttl > 0) snapshotCmds.add("EXPIRE" + key + "" + ttl);
             }
         }
         return snapshotCmds;
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 冲突六（已知未处理）：Leader 广播复制数据（异步，可能丢数据）
+    // ════════════════════════════════════════════════════════════
+
     /**
-     * 广播写操作指令给所有的从节点
+     * 【冲突六（已知未处理）】Leader 广播写操作指令给所有 Follower
+     *
+     * 这是整个项目在一致性方面最大的简化：
+     *
+     * 当前做法（异步复制）：
+     *   CompletableFuture.runAsync() → 发完就不管了 → 不等待 Follower 确认
+     *   Leader 写完立刻返回 "OK" 给客户端 → 高性能
+     *   风险：如果 Leader 在广播完成前崩溃，Follower 没收到这条数据
+     *         新 Leader（从 Follower 选出的）没有这条数据 → 数据丢失
+     *
+     * 真正的 Raft 做法（同步复制）：
+     *   Leader 必须等过半 Follower 确认收到并写入后，才返回 "OK" 给客户端
+     *   int confirmed = 1;
+     *   for (Follower f : peers) { if (f.replicateAndWait(cmd)) confirmed++; }
+     *   if (confirmed >= majority) return "OK";
+     *   代价：每次写都要等网络往返 → 延迟高
+     *
+     * 项目选择了"异步"方案，牺牲了强一致性换取了性能。
      */
     private void broadcastReplication(List<String> cmd) {
         List<String> repCmd = new ArrayList<>();
@@ -297,16 +518,33 @@ public class ClusterManager implements Closeable {
         repCmd.addAll(cmd);
 
         for (String address : peers.values()) {
+            // 【冲突六】异步发送，不等待 Follower 确认 → 可能丢数据
             CompletableFuture.runAsync(() -> {
                 try {
-                    sendCommandToPeer(address, repCmd, false);
+                    sendCommandToPeer(address, repCmd, false);  // false = 不等回复
                 } catch (Exception ignored) {}
             });
         }
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 冲突七 处理：新节点主动拉取全量快照
+    // ════════════════════════════════════════════════════════════
+
     /**
-     * 向 Peer 主动请求拉取数据快照进行全量初始化同步
+     * 【冲突七】新节点主动向已有节点请求全量数据快照进行初始化同步
+     *
+     * 调用时机：新节点启动 1.2 秒后（给集群发现彼此的时间）
+     *
+     * 流程：
+     *  ① 向任意 Peer 发送 CLUSTER_SYNC → 等待响应
+     *  ② Peer（Leader 或 Follower）返回全量快照
+     *  ③ 清空本地 engine.clear()
+     *  ④ 逐条回放快照命令 → database.execute(cmd, false)
+     *     false = 不写 AOF（Leader 有 AOF）、不广播（避免死循环）
+     *
+     * 如果 Leader 或 Follower 已经是空的（没有数据要同步），
+     * 或本身就是 Leader → 跳过同步。
      */
     private void joinAndSyncData() {
         if (currentRole == Role.LEADER || peers.isEmpty()) {
@@ -314,18 +552,18 @@ public class ClusterManager implements Closeable {
         }
         System.out.println("[Cluster] Syncing full data snapshot from Master...");
         List<String> joinCmd = List.of("CLUSTER_SYNC");
-        
+
         for (String address : peers.values()) {
             try {
                 List<String> snapshot = sendCommandToPeer(address, joinCmd, true);
                 if (snapshot != null && !snapshot.isEmpty()) {
                     System.out.println("[Cluster] Replaying " + snapshot.size() + " snapshot commands to synchronize local database...");
-                    database.getEngine().clear();
-                    
+                    database.getEngine().clear();  // 【冲突七】清空本地旧数据
+
                     for (String line : snapshot) {
-                        String[] parts = line.split("\u0001");
+                        String[] parts = line.split("");
                         List<String> cmd = Arrays.asList(parts);
-                        database.execute(cmd, false);
+                        database.execute(cmd, false);  // 【冲突七】回放快照，不广播不写 AOF
                     }
                     System.out.println("[Cluster] Data synchronization completed successfully.");
                     break;
@@ -336,6 +574,10 @@ public class ClusterManager implements Closeable {
 
     /**
      * 通过 TCP 连接发送 RESP 命令到指定 Peer 并接收返回结果
+     *
+     * @param address        "ip:port" 格式
+     * @param cmd            RESP 命令列表
+     * @param expectResponse true=等待响应（选举投票、同步请求），false=发完就走（心跳、复制）
      */
     private List<String> sendCommandToPeer(String address, List<String> cmd, boolean expectResponse) throws IOException {
         String[] hostPort = address.split(":");
@@ -343,12 +585,12 @@ public class ClusterManager implements Closeable {
         int port = Integer.parseInt(hostPort[1]);
 
         try (Socket socket = new Socket()) {
-            socket.connect(new InetSocketAddress(host, port), 1200);
+            socket.connect(new InetSocketAddress(host, port), 1200);  // 1.2 秒连接超时
             OutputStream out = socket.getOutputStream();
-            
+
             // 写入命令
             RespParser.writeArray(out, cmd);
-            
+
             if (expectResponse) {
                 InputStream in = socket.getInputStream();
                 // 使用 RESP 响应解析
@@ -358,6 +600,10 @@ public class ClusterManager implements Closeable {
         return null;
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 公共查询接口
+    // ════════════════════════════════════════════════════════════
+
     public synchronized Role getCurrentRole() {
         return currentRole;
     }
@@ -366,6 +612,16 @@ public class ClusterManager implements Closeable {
         return leaderId;
     }
 
+    /**
+     * 【冲突五 - 写保护】判断当前节点是否可以接受写操作
+     *
+     * 单机模式（peers 为空）：可以写
+     * 集群模式：只有 LEADER 可以写
+     *
+     * 这个方法被 DatabaseServer.handleClient() 调用：
+     *   客户端发来写命令 → isWritable() == false → 直接返回错误
+     *   "Operation rejected: Current node is not Cluster Master."
+     */
     public synchronized boolean isWritable() {
         return peers.isEmpty() || currentRole == Role.LEADER;
     }

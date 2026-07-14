@@ -6,7 +6,8 @@ import java.io.IOException;
 import java.util.*;
 
 /**
- * 数据库业务中央管理器，整合 Redis 兼容 Engine 与 AOF 持久化存储
+ * 数据库业务中央管理器，整合 LSMT Engine 与 AOF 持久化存储
+ * 满足课程设计: Collection管理、批量操作、RESTful调度衔接
  */
 public class Database implements AutoCloseable {
 
@@ -29,15 +30,14 @@ public class Database implements AutoCloseable {
     }
 
     public Database(String dbDir, long rotateThreshold) throws Exception {
-        this.engine = new Engine();
-        
         File dir = new File(dbDir);
         if (!dir.exists()) {
             dir.mkdirs();
         }
-        
+
+        this.engine = new Engine(dir);
         this.aofManager = new AofManager(dbDir, rotateThreshold);
-        
+
         // 重启恢复：扫描并重放 AOF 文件中的所有历史命令
         recover();
     }
@@ -129,36 +129,86 @@ public class Database implements AutoCloseable {
                     engine.srem(cmd.get(1), cmd.get(2));
                 }
                 break;
+            case "MSET":
+                if (cmd.size() >= 3 && cmd.size() % 2 == 1) {
+                    engine.mset(cmd.subList(1, cmd.size()));
+                }
+                break;
             case "FLUSHALL":
                 engine.clear();
+                break;
+            case "CREATE":
+                // CREATE COLLECTION <name>
+                if (cmd.size() >= 3 && "COLLECTION".equalsIgnoreCase(cmd.get(1))) {
+                    engine.createCollection(cmd.get(2));
+                }
+                break;
+            case "DROP":
+                // DROP COLLECTION <name>
+                if (cmd.size() >= 3 && "COLLECTION".equalsIgnoreCase(cmd.get(1))) {
+                    engine.dropCollection(cmd.get(2));
+                }
                 break;
         }
     }
 
     /**
      * 【主入口：执行客户端命令】
-     * 写指令：AOF 追加 ➔ 本地执行 ➔ 集群广播
+     * 写指令：AOF 追加 → 本地执行 → 集群广播
      * 读指令：直接本地执行并返回结果
+     *
+     * ════════════════════════════════════════════════════════
+     * 【冲突四】两个客户端同时写同一个 Key 的冲突处理
+     *
+     * 场景：客户端 A 和客户端 B 同时向 Leader 发送 SET name Alice / SET name Bob
+     *
+     * 处理方式：synchronized 串行化
+     *   整个 execute() 方法加了 synchronized 关键字
+     *   → 同一时刻只有一条命令在执行
+     *   → 不会出现两条 SET 命令交替执行导致数据错乱
+     *   → 效果和 Redis 单线程模型一致：后写的覆盖先写的
+     *
+     * 为什么不用更细粒度的锁？
+     *   因为写操作需要三步（AOF + 内存 + 广播），
+     *   三步必须原子完成，否则可能出现 AOF 写了一半就被打断的情况。
+     *   synchronized 保证了三步的原子性。
+     *
+     * 代价：synchronized 是整个 Database 级别的锁
+     *   → 写操作是串行的（即使是不同 key）
+     *   → 高并发写入场景下这是瓶颈
+     *   真正的 Redis 用单线程事件循环代替全局锁，更高效。
+     * ════════════════════════════════════════════════════════
      */
     public synchronized Object execute(List<String> cmd, boolean replicate) throws Exception {
         if (cmd == null || cmd.isEmpty()) {
             return null;
         }
         String action = cmd.get(0).toUpperCase();
-        if (!"INFO".equals(action) && !"PING".equals(action)) {
+        if (!"INFO".equals(action) && !"PING".equals(action) && !"LIST".equals(action)) {
             totalCommands.incrementAndGet();
         }
-        boolean isWrite = isWriteCommand(action);
+        boolean isWrite = isWriteCommand(cmd);
 
         // 1. 如果是写指令，先写 AOF 追加日志
         if (isWrite && replicate) {
             aofManager.append(cmd);
         }
 
-        // 2. 执行内存数据库动作
-        Object result = dispatchCommand(action, cmd);
+        // 2. 执行内存数据库动作（含错误处理）
+        Object result;
+        try {
+            result = dispatchCommand(cmd);
+        } catch (ClassCastException e) {
+            return new ErrorResult("WRONGTYPE " + e.getMessage());
+        } catch (NumberFormatException e) {
+            return new ErrorResult("ERR " + e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return new ErrorResult(e.getMessage());
+        } catch (UnsupportedOperationException e) {
+            return new ErrorResult(e.getMessage());
+        }
 
-        // 3. 如果是写指令且当前是 Leader (replicate=true)，触发主从复制广播
+        // 3. 如果是写指令且当前是 Leader，触发主从复制广播
         if (isWrite && replicate && replicationListener != null) {
             replicationListener.onReplicate(cmd);
         }
@@ -166,7 +216,9 @@ public class Database implements AutoCloseable {
         return result;
     }
 
-    private boolean isWriteCommand(String action) {
+    private boolean isWriteCommand(List<String> cmd) {
+        if (cmd.isEmpty()) return false;
+        String action = cmd.get(0).toUpperCase();
         switch (action) {
             case "SET":
             case "DEL":
@@ -181,14 +233,28 @@ public class Database implements AutoCloseable {
             case "RPOP":
             case "SADD":
             case "SREM":
+            case "MSET":
             case "FLUSHALL":
+            case "CREATE":
+            case "DROP":
                 return true;
             default:
                 return false;
         }
     }
 
-    private Object dispatchCommand(String action, List<String> cmd) throws Exception {
+    @SuppressWarnings("unchecked")
+    private Object dispatchCommand(List<String> cmd) throws Exception {
+        String action = cmd.get(0).toUpperCase();
+
+        // 处理复合命令
+        if ("CREATE".equals(action) && cmd.size() >= 3 && "COLLECTION".equalsIgnoreCase(cmd.get(1))) {
+            return engine.createCollection(cmd.get(2));
+        }
+        if ("DROP".equals(action) && cmd.size() >= 3 && "COLLECTION".equalsIgnoreCase(cmd.get(1))) {
+            return engine.dropCollection(cmd.get(2));
+        }
+
         switch (action) {
             case "INFO":
                 long totalMem = Runtime.getRuntime().totalMemory();
@@ -198,7 +264,12 @@ public class Database implements AutoCloseable {
                        "total_memory:" + totalMem + "\r\n" +
                        "total_commands_processed:" + totalCommands.get() + "\r\n" +
                        "role:" + getClusterRole() + "\r\n" +
-                       "db_keys:" + engine.dbSize() + "\r\n";
+                       "db_keys:" + engine.dbSize() + "\r\n" +
+                       "memtable_size:" + engine.getMemTableSize() + "\r\n" +
+                       "hash_index_size:" + engine.getHashIndexSize() + "\r\n" +
+                       "sstable_count:" + engine.getSSTableCount() + "\r\n" +
+                       "cache_hits:" + engine.getCacheHitCount() + "\r\n" +
+                       "cache_misses:" + engine.getCacheMissCount() + "\r\n";
             case "PING":
                 return "PONG";
             case "SET":
@@ -288,6 +359,18 @@ public class Database implements AutoCloseable {
             case "SISMEMBER":
                 if (cmd.size() < 3) throw new IllegalArgumentException("ERR wrong number of arguments for 'sismember' command");
                 return (long) engine.sismember(cmd.get(1), cmd.get(2));
+            case "MSET":
+                if (cmd.size() < 3 || cmd.size() % 2 != 1) throw new IllegalArgumentException("ERR wrong number of arguments for 'mset' command");
+                return (long) engine.mset(cmd.subList(1, cmd.size()));
+            case "MGET":
+                if (cmd.size() < 2) throw new IllegalArgumentException("ERR wrong number of arguments for 'mget' command");
+                return engine.mget(cmd.subList(1, cmd.size()));
+            case "LIST":
+                // LIST COLLECTIONS
+                if (cmd.size() >= 2 && "COLLECTIONS".equalsIgnoreCase(cmd.get(1))) {
+                    return new ArrayList<>(engine.listCollections());
+                }
+                throw new UnsupportedOperationException("ERR unknown command '" + String.join(" ", cmd) + "'");
             case "DBSIZE":
                 return (long) engine.dbSize();
             case "KEYS":
@@ -298,6 +381,17 @@ public class Database implements AutoCloseable {
             default:
                 throw new UnsupportedOperationException("ERR unknown command '" + action + "'");
         }
+    }
+
+    /**
+     * 错误结果包装类 — 用于 DatabaseServer 识别错误响应
+     */
+    public static class ErrorResult {
+        private final String message;
+        public ErrorResult(String message) { this.message = message; }
+        public String getMessage() { return message; }
+        @Override
+        public String toString() { return message; }
     }
 
     public Engine getEngine() {

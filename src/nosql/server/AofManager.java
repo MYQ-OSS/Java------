@@ -111,14 +111,14 @@ public class AofManager implements Closeable {
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
             ZipEntry entry = zis.getNextEntry();
             if (entry != null) {
-                // 使用包装好的流，从 Zip 里流式重放 RESP 数组命令
-                // 为了能流式读取，不能一次性全读进内存，直接包一层 BufferedInputStream
                 BufferedInputStream bis = new BufferedInputStream(zis) {
                     @Override
                     public void close() throws IOException {
                         // 拦截 close，防止流被意外提前关闭
                     }
                 };
+                int cmdCount = 0;
+                int errorCount = 0;
                 while (true) {
                     try {
                         List<String> cmd = RespParser.readRequest(bis);
@@ -126,9 +126,24 @@ public class AofManager implements Closeable {
                             break;
                         }
                         executor.execute(cmd, engine);
+                        cmdCount++;
                     } catch (EOFException e) {
                         break;
+                    } catch (Exception e) {
+                        // 跳过损坏的 AOF 条目，继续恢复后续有效命令
+                        errorCount++;
+                        System.err.println("[AOF] Skipping corrupted entry in " +
+                                zipFile.getName() + ": " + e.getMessage());
+                        if (errorCount > 100) {
+                            System.err.println("[AOF] Too many errors in " + zipFile.getName() +
+                                    ", stopping recovery of this segment");
+                            break;
+                        }
                     }
+                }
+                if (errorCount > 0) {
+                    System.out.println("[AOF] Recovered " + cmdCount + " commands from " +
+                            zipFile.getName() + " (" + errorCount + " corrupted entries skipped)");
                 }
             }
         }
@@ -136,6 +151,8 @@ public class AofManager implements Closeable {
 
     private void loadFromAofFile(File aofFile, Engine engine, CommandExecutor executor) throws Exception {
         try (BufferedInputStream bis = new BufferedInputStream(new FileInputStream(aofFile))) {
+            int cmdCount = 0;
+            int errorCount = 0;
             while (true) {
                 try {
                     List<String> cmd = RespParser.readRequest(bis);
@@ -143,9 +160,22 @@ public class AofManager implements Closeable {
                         break;
                     }
                     executor.execute(cmd, engine);
+                    cmdCount++;
                 } catch (EOFException e) {
                     break;
+                } catch (Exception e) {
+                    // 跳过损坏的条目或截断的尾部
+                    errorCount++;
+                    System.err.println("[AOF] Skipping corrupted entry in active.aof: " + e.getMessage());
+                    if (errorCount > 50) {
+                        System.err.println("[AOF] Too many errors in active.aof, stopping recovery");
+                        break;
+                    }
                 }
+            }
+            if (errorCount > 0) {
+                System.out.println("[AOF] Recovered " + cmdCount + " commands from active.aof (" +
+                        errorCount + " corrupted entries skipped)");
             }
         }
     }
