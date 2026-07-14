@@ -4,11 +4,6 @@ src/nosql/client/NoSqlGui.java
 src/nosql/client/NoSqlSdk.java
 src/nosql/cluster/ClusterManager.java
 src/nosql/common/DbValue.java
-src/nosql/common/NspPacket.java
-src/nosql/common/OpCode.java
-src/nosql/common/ProtocolUtil.java
-src/nosql/common/Request.java
-src/nosql/common/Response.java
 src/nosql/common/RespParser.java
 src/nosql/server/AofManager.java
 src/nosql/server/Database.java

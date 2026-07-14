@@ -70,6 +70,8 @@ public class ClusterManager implements Closeable {
     private int currentTerm = 0;        // 当前任期号，Raft 协议的核心，term 大的优先
     private String votedFor = null;     // 当前 term 内投票给了谁（null 表示还没投票）
     private String leaderId = null;     // 当前已知的 Leader 节点 ID
+    private final java.util.concurrent.atomic.AtomicLong lastLogIndex =
+            new java.util.concurrent.atomic.AtomicLong(0); // 最后一条写命令的日志索引
 
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
     private ScheduledFuture<?> electionTimeoutTask;  // 选举超时检测定时任务
@@ -95,6 +97,7 @@ public class ClusterManager implements Closeable {
         // ============================================================
         this.database.setReplicationListener(cmd -> {
             if (currentRole == Role.LEADER) {
+                lastLogIndex.incrementAndGet(); // 写命令递增日志索引
                 broadcastReplication(cmd);
             }
         });
@@ -221,8 +224,9 @@ public class ClusterManager implements Closeable {
         int votesNeeded = (peers.size() + 1) / 2 + 1;
         AtomicInteger voteCount = new AtomicInteger(1);  // 已投自己 1 票
 
-        // 组装选票请求 RESP 命令：CLUSTER_ELECT REQUEST_VOTE <term> <candidateId>
-        List<String> electCmd = List.of("CLUSTER_ELECT", "REQUEST_VOTE", String.valueOf(currentTerm), nodeId);
+        // 组装选票请求 RESP 命令：CLUSTER_ELECT REQUEST_VOTE <term> <candidateId> <lastLogIndex>
+        List<String> electCmd = List.of("CLUSTER_ELECT", "REQUEST_VOTE",
+                String.valueOf(currentTerm), nodeId, String.valueOf(lastLogIndex.get()));
 
         // 向所有 peer 并发拉票
         for (Map.Entry<String, String> entry : peers.entrySet()) {
@@ -293,8 +297,9 @@ public class ClusterManager implements Closeable {
             return;
         }
 
-        // 组装心跳包 RESP 命令：CLUSTER_HEARTBEAT <leaderNodeId> <term>
-        List<String> hbCmd = List.of("CLUSTER_HEARTBEAT", nodeId, String.valueOf(currentTerm));
+        // 组装心跳包 RESP 命令：CLUSTER_HEARTBEAT <leaderNodeId> <term> <lastLogIndex>
+        List<String> hbCmd = List.of("CLUSTER_HEARTBEAT", nodeId,
+                String.valueOf(currentTerm), String.valueOf(lastLogIndex.get()));
 
         for (String address : peers.values()) {
             CompletableFuture.runAsync(() -> {
@@ -333,6 +338,8 @@ public class ClusterManager implements Closeable {
         String subType = cmd.get(1);
         int term = Integer.parseInt(cmd.get(2));
         String candidateId = cmd.get(3);
+        // 解析候选者的最后日志索引（兼容旧版不传此字段的请求）
+        long candidateLogIndex = cmd.size() >= 5 ? Long.parseLong(cmd.get(4)) : 0;
 
         if ("REQUEST_VOTE".equalsIgnoreCase(subType)) {
             // 【冲突三】对方的 term 更大 → 我退回到 FOLLOWER，承认新时代
@@ -346,15 +353,22 @@ public class ClusterManager implements Closeable {
             }
 
             // 【冲突一】同 term + 还没投票（或已投给同一个人）→ 投票
-            // votedFor == null：还没投过票 → 投给他
-            // votedFor.equals(candidateId)：已经投给了他（重复请求）→ 再次确认
+            // 新增判断：候选者的数据必须至少和自己一样新（logIndex 比较）
             if (term == currentTerm && (votedFor == null || votedFor.equals(candidateId))) {
-                votedFor = candidateId;
-                System.out.println("[Cluster] Granted vote to candidate: " + candidateId + " in term " + term);
-                return List.of("VOTE_GRANTED", String.valueOf(currentTerm));
+                // lastLogIndex 比较：数据更新的候选者优先
+                if (candidateLogIndex >= lastLogIndex.get()) {
+                    votedFor = candidateId;
+                    System.out.println("[Cluster] Granted vote to candidate: " + candidateId
+                            + " in term " + term + " (logIndex: " + candidateLogIndex + ")");
+                    return List.of("VOTE_GRANTED", String.valueOf(currentTerm));
+                } else {
+                    System.out.println("[Cluster] Rejected vote for " + candidateId
+                            + ": candidate logIndex " + candidateLogIndex
+                            + " < local " + lastLogIndex.get());
+                }
             }
         }
-        // term 更小，或者同 term 已投给别人 → 拒绝
+        // term 更小，或者同 term 已投给别人，或者候选者数据不够新 → 拒绝
         return List.of("VOTE_REJECTED", String.valueOf(currentTerm));
     }
 
@@ -386,12 +400,20 @@ public class ClusterManager implements Closeable {
         if (cmd.size() < 3) return;
         String termLeader = cmd.get(1);
         int term = Integer.parseInt(cmd.get(2));
+        // 更新 Leader 的最新日志索引（兼容旧版不传此字段）
+        if (cmd.size() >= 4) {
+            long leaderLogIndex = Long.parseLong(cmd.get(3));
+            if (leaderLogIndex > lastLogIndex.get()) {
+                lastLogIndex.set(leaderLogIndex);
+            }
+        }
 
         // 【冲突三】只有 term >= currentTerm 的心跳才被接受
         // 旧 Leader (term 小) 的心跳直接忽略
         if (term >= currentTerm) {
             if (currentRole != Role.FOLLOWER || !termLeader.equals(leaderId) || term > currentTerm) {
-                System.out.println("[Cluster] Node " + nodeId + " follows Leader: " + termLeader + " for Term: " + term);
+                System.out.println("[Cluster] Node " + nodeId + " follows Leader: " + termLeader
+                        + " for Term: " + term + " (logIndex: " + lastLogIndex.get() + ")");
             }
             // 【冲突三】自动降级为 FOLLOWER，承认新 Leader
             currentRole = Role.FOLLOWER;
@@ -420,6 +442,7 @@ public class ClusterManager implements Closeable {
         // cmd.get(0) 为 CLUSTER_REPLICATE，后面跟着写命令列表（例如 ["SET", "name", "mayiqin"]）
         List<String> subCmd = cmd.subList(1, cmd.size());
         database.execute(subCmd, false); // false = 本地执行，不进行二次集群广播，不写 AOF
+        lastLogIndex.incrementAndGet();  // Follower 也递增日志索引
     }
 
     // ════════════════════════════════════════════════════════════
@@ -624,6 +647,11 @@ public class ClusterManager implements Closeable {
      */
     public synchronized boolean isWritable() {
         return peers.isEmpty() || currentRole == Role.LEADER;
+    }
+
+    /** 获取当前最后日志索引（用于测试和集群同步） */
+    public long getLastLogIndex() {
+        return lastLogIndex.get();
     }
 
     @Override

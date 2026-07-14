@@ -292,6 +292,11 @@ public class SSTable {
 
         long timestamp = System.currentTimeMillis();
         File compactFile = new File(dir, "sstable_" + timestamp + ".sst");
+        // 防止时间戳碰撞：如果同名文件已存在且不是源文件，递增时间戳
+        while (compactFile.exists()) {
+            timestamp++;
+            compactFile = new File(dir, "sstable_" + timestamp + ".sst");
+        }
 
         Map<String, Long> offsetMap = new LinkedHashMap<>();
 

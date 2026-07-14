@@ -29,7 +29,8 @@ public class Engine {
 
     // LSMT 组件
     private final HashIndex hashIndex = new HashIndex();
-    private final LruCache lruCache = new LruCache(500); // 500 条热数据缓存
+    private final LruCache lruCache = new LruCache(500); // L1: 500 条热数据缓存
+    private final L2Cache l2Cache = new L2Cache(5000, 300); // L2: 5000 条，5 分钟 TTL
     private final File dataDir;
     private final int memtableFlushThreshold; // MemTable 刷写阈值（key 数量）
     private final List<File> sstables = new CopyOnWriteArrayList<>(); // SSTable 文件列表（新→旧）
@@ -277,8 +278,9 @@ public class Engine {
     public void set(String key, String value) {
         dbMap.put(key, value);
         expireMap.remove(key);
-        // 更新 LRU 缓存
+        // 更新 L1，失效 L2（写操作保证缓存与磁盘一致性）
         lruCache.put("default", key, new DbValue(DbValue.Type.STRING, value));
+        l2Cache.invalidate("default", key);
         // 检查刷写阈值
         checkFlushThreshold();
     }
@@ -288,14 +290,23 @@ public class Engine {
             return null;
         }
 
-        // 1. 先查 LRU 缓存
+        // 1. 先查 L1 LRU 缓存
         DbValue cached = lruCache.get("default", key);
         if (cached != null) {
             cacheHits.incrementAndGet();
             return cached.asString();
         }
 
-        // 2. 查 MemTable
+        // 2. 查 L2 缓存（双级缓存补充）
+        DbValue l2Cached = l2Cache.get("default", key);
+        if (l2Cached != null) {
+            cacheHits.incrementAndGet();
+            // 回填 L1
+            lruCache.put("default", key, l2Cached);
+            return l2Cached.asString();
+        }
+
+        // 3. 查 MemTable
         Object obj = dbMap.get(key);
         if (obj != null) {
             cacheMisses.incrementAndGet();
@@ -303,12 +314,14 @@ public class Engine {
                 throw new ClassCastException("WRONGTYPE Operation against a key holding the wrong kind of value");
             }
             String val = (String) obj;
-            // 回填 LRU 缓存
-            lruCache.put("default", key, new DbValue(DbValue.Type.STRING, val));
+            // 回填 L1 + L2 缓存
+            DbValue dbVal = new DbValue(DbValue.Type.STRING, val);
+            lruCache.put("default", key, dbVal);
+            l2Cache.put("default", key, dbVal);
             return val;
         }
 
-        // 3. 查 HashIndex → SSTable 磁盘读取
+        // 4. 查 HashIndex → SSTable 磁盘读取
         cacheMisses.incrementAndGet();
         HashIndex.IndexEntry idxEntry = hashIndex.get(key);
         if (idxEntry != null) {
@@ -318,8 +331,10 @@ public class Engine {
                 if (sstFile.exists()) {
                     String diskVal = SSTable.read(sstFile, key);
                     if (diskVal != null) {
-                        // 回填 LRU 缓存和 MemTable（热数据回到内存）
-                        lruCache.put("default", key, new DbValue(DbValue.Type.STRING, diskVal));
+                        // 回填 L1 + L2 缓存和 MemTable（热数据回到内存）
+                        DbValue dbVal = new DbValue(DbValue.Type.STRING, diskVal);
+                        lruCache.put("default", key, dbVal);
+                        l2Cache.put("default", key, dbVal);
                         dbMap.put(key, diskVal);
                         return diskVal;
                     }
@@ -343,6 +358,7 @@ public class Engine {
         expireMap.remove(key);
         hashIndex.remove(key);
         lruCache.invalidate("default", key);
+        l2Cache.invalidate("default", key);
     }
 
     public boolean expire(String key, int seconds) {
@@ -801,6 +817,7 @@ public class Engine {
         expireMap.clear();
         hashIndex.clear();
         lruCache.clear();
+        l2Cache.clear();
         collectionNames.clear();
         // 删除所有 SSTable 文件
         for (File f : sstables) {
@@ -836,9 +853,11 @@ public class Engine {
         saveCollectionMeta();
         cleanScheduler.shutdown();
         compactionExecutor.shutdown();
+        l2Cache.shutdown();
         System.out.println("[Engine] Shutdown complete. Cache stats — hits: " +
                 cacheHits.get() + ", misses: " + cacheMisses.get() +
-                ", sstable reads: " + sstableReads.get());
+                ", sstable reads: " + sstableReads.get() +
+                ", L2 hits: " + l2Cache.getHitCount() + ", L2 misses: " + l2Cache.getMissCount());
     }
 
     public String type(String key) {

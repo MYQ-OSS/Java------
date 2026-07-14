@@ -1,0 +1,27 @@
+# 编译产物
+bin/
+test-bin/
+out/
+
+# JAR 分发
+dist/
+
+# IDE
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+
+# 数据目录（运行时生成）
+data/
+
+# 临时文件
+*.tmp
+compile_list.txt
+sources_test.txt
+test_files.txt
+
+# OS 文件
+.DS_Store
+Thumbs.db
