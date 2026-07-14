@@ -120,28 +120,28 @@ public class NoSqlGui {
     private void createView() {
         frame = new JFrame("Another Java-Redis 可视化桌面管理器");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(1260, 840); 
-        frame.setMinimumSize(new Dimension(1000, 680)); 
+        frame.setSize(1450, 920);
+        frame.setMinimumSize(new Dimension(1100, 760));
         frame.setLocationRelativeTo(null);
 
-        JPanel rootPanel = new JPanel(new BorderLayout(20, 20));
+        JPanel rootPanel = new JPanel(new BorderLayout(24, 24));
         rootPanel.setBackground(COLOR_BG);
-        rootPanel.setBorder(new EmptyBorder(20, 20, 20, 20));
+        rootPanel.setBorder(new EmptyBorder(24, 24, 24, 24));
         frame.setContentPane(rootPanel);
 
         // ==========================================
         // 1. 顶部功能区 (连接与全局清空，互不影响)
         // ==========================================
         RoundedPanel connectionBar = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
-        connectionBar.setLayout(new BorderLayout(15, 0));
-        connectionBar.setBorder(new EmptyBorder(12, 20, 12, 20));
-        
-        JPanel connLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 0));
+        connectionBar.setLayout(new BorderLayout(20, 0));
+        connectionBar.setBorder(new EmptyBorder(14, 24, 14, 24));
+
+        JPanel connLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 18, 0));
         connLeft.setBackground(COLOR_CARD);
-        hostField = new FlatTextField("127.0.0.1", 12);
+        hostField = new FlatTextField("127.0.0.1", 15);
         portField = new FlatTextField("8080", 6);
         connectBtn = new FlatButton("⚡ 连接服务端");
-        connectBtn.setPreferredSize(new Dimension(150, 36)); 
+        connectBtn.setPreferredSize(new Dimension(160, 40));
         connectBtn.setThemeColors(new Color(239, 246, 255), new Color(219, 234, 254), new Color(191, 219, 254), COLOR_ACCENT);
 
         connLeft.add(createLabel("服务IP地址:"));
@@ -154,7 +154,7 @@ public class NoSqlGui {
         JPanel connRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 15, 0));
         connRight.setBackground(COLOR_CARD);
         flushBtn = new FlatButton("🧹 清空所有数据");
-        flushBtn.setPreferredSize(new Dimension(150, 36));
+        flushBtn.setPreferredSize(new Dimension(160, 40));
         flushBtn.setThemeColors(new Color(254, 226, 226), new Color(254, 202, 202), new Color(252, 165, 165), new Color(220, 38, 38));
         flushBtn.setEnabled(false);
         connRight.add(flushBtn);
@@ -165,29 +165,29 @@ public class NoSqlGui {
         // ==========================================
         // 2. 左侧边栏 (Sidebar) - 数据操作区 (目录树 + 快捷数据操作表单)
         // ==========================================
-        JPanel sidebarPanel = new JPanel(new BorderLayout(0, 15));
+        JPanel sidebarPanel = new JPanel(new BorderLayout(0, 18));
         sidebarPanel.setBackground(COLOR_BG);
-        sidebarPanel.setPreferredSize(new Dimension(380, 0)); 
+        sidebarPanel.setPreferredSize(new Dimension(420, 0));
 
         // 2.1 目录树卡片 (上半部分)
         RoundedPanel treeCard = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
-        treeCard.setLayout(new BorderLayout(12, 12));
-        treeCard.setBorder(new EmptyBorder(15, 15, 15, 15));
+        treeCard.setLayout(new BorderLayout(15, 15));
+        treeCard.setBorder(new EmptyBorder(18, 18, 18, 18));
 
-        JPanel searchBar = new JPanel(new BorderLayout(8, 0));
+        JPanel searchBar = new JPanel(new BorderLayout(10, 0));
         searchBar.setBackground(COLOR_CARD);
-        searchField = new FlatTextField("", 10);
+        searchField = new FlatTextField("", 12);
         searchField.setToolTipText("搜索键名 (例: user:*)");
-        
-        JPanel treeBtns = new JPanel(new GridLayout(1, 2, 8, 0));
+
+        JPanel treeBtns = new JPanel(new GridLayout(1, 2, 10, 0));
         treeBtns.setBackground(COLOR_CARD);
         addKeyBtn = new FlatButton("➕ 新建键");
-        addKeyBtn.setPreferredSize(new Dimension(90, 34));
+        addKeyBtn.setPreferredSize(new Dimension(98, 38));
         addKeyBtn.setThemeColors(new Color(236, 253, 245), new Color(209, 250, 229), new Color(167, 243, 208), new Color(4, 120, 87));
         addKeyBtn.setEnabled(false);
-        
+
         refreshBtn = new FlatButton("🔄 刷新");
-        refreshBtn.setPreferredSize(new Dimension(75, 34));
+        refreshBtn.setPreferredSize(new Dimension(85, 38));
         refreshBtn.setThemeColors(new Color(248, 250, 252), new Color(241, 245, 249), new Color(226, 232, 240), COLOR_MUTED);
         refreshBtn.setEnabled(false);
         treeBtns.add(addKeyBtn);
@@ -223,12 +223,12 @@ public class NoSqlGui {
         // 2.2 快捷数据操作表单卡片 (下半部分)
         RoundedPanel quickOpCard = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
         quickOpCard.setLayout(new GridBagLayout());
-        quickOpCard.setBorder(new EmptyBorder(18, 18, 18, 18));
-        quickOpCard.setPreferredSize(new Dimension(0, 340)); 
+        quickOpCard.setBorder(new EmptyBorder(20, 20, 20, 20));
+        quickOpCard.setPreferredSize(new Dimension(0, 380));
 
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.insets = new Insets(6, 0, 6, 0);
+        gbc.insets = new Insets(8, 0, 8, 0);
         gbc.gridx = 0;
 
         JLabel opTitle = new JLabel("⚡ 快捷数据写/删操作");
@@ -238,18 +238,18 @@ public class NoSqlGui {
         quickOpCard.add(opTitle, gbc);
 
         // 键名输入
-        JPanel opKeyRow = new JPanel(new BorderLayout(10, 0));
+        JPanel opKeyRow = new JPanel(new BorderLayout(12, 0));
         opKeyRow.setBackground(COLOR_CARD);
-        opKeyField = new FlatTextField("", 10);
+        opKeyField = new FlatTextField("", 12);
         opKeyRow.add(createLabel("键名:"), BorderLayout.WEST);
         opKeyRow.add(opKeyField, BorderLayout.CENTER);
         gbc.gridy = 1;
         quickOpCard.add(opKeyRow, gbc);
 
         // 键值输入
-        JPanel opValRow = new JPanel(new BorderLayout(10, 0));
+        JPanel opValRow = new JPanel(new BorderLayout(12, 0));
         opValRow.setBackground(COLOR_CARD);
-        opValField = new FlatTextField("", 10);
+        opValField = new FlatTextField("", 12);
         opValRow.add(createLabel("键值:"), BorderLayout.WEST);
         opValRow.add(opValField, BorderLayout.CENTER);
         gbc.gridy = 2;
@@ -267,7 +267,7 @@ public class NoSqlGui {
         quickOpCard.add(opTypeRow, gbc);
 
         // 操作按钮组合（2行3列：写入/读取/删除 + 检查/列出/生命周期）
-        JPanel opBtnRow = new JPanel(new GridLayout(2, 3, 8, 6));
+        JPanel opBtnRow = new JPanel(new GridLayout(2, 3, 10, 8));
         opBtnRow.setBackground(COLOR_CARD);
 
         opWriteBtn = new FlatButton("写入 SET");
@@ -302,7 +302,7 @@ public class NoSqlGui {
         opBtnRow.add(opTtlBtn);
         
         gbc.gridy = 4;
-        gbc.insets = new Insets(10, 0, 0, 0);
+        gbc.insets = new Insets(12, 0, 4, 0);
         quickOpCard.add(opBtnRow, gbc);
 
         sidebarPanel.add(quickOpCard, BorderLayout.SOUTH);
@@ -317,13 +317,13 @@ public class NoSqlGui {
         // ==========================================
         // 3.1 Card A: Server Dashboard 看板 (含可调节大小的测试仿真窗口与终端)
         // ==========================================
-        JPanel dashboardPanel = new JPanel(new BorderLayout(0, 15));
+        JPanel dashboardPanel = new JPanel(new BorderLayout(0, 18));
         dashboardPanel.setBackground(COLOR_BG);
 
         // A1. 顶层三个指标小卡片 (固定在 Dashboard 北部)
-        JPanel statsPanel = new JPanel(new GridLayout(1, 3, 18, 0));
+        JPanel statsPanel = new JPanel(new GridLayout(1, 3, 20, 0));
         statsPanel.setBackground(COLOR_BG);
-        statsPanel.setPreferredSize(new Dimension(0, 115));
+        statsPanel.setPreferredSize(new Dimension(0, 130));
 
         RoundedPanel dbSizeCard = createStatCard(" 键总数 (Keys Count)", dbSizeLabel = new JLabel("0", SwingConstants.CENTER), new Color(239, 246, 255), new Color(191, 219, 254)); 
         RoundedPanel memoryCard = createStatCard(" 内存缓存占用 (Cache)", memoryLabel = new JLabel("0.0 KB", SwingConstants.CENTER), new Color(245, 243, 255), new Color(221, 214, 254)); 
@@ -382,7 +382,7 @@ public class NoSqlGui {
         seekProgressBar.setForeground(COLOR_ACCENT);
         
         startSeekBtn = new FlatButton("🚀 开启磁盘 O(1) Seek 仿真");
-        startSeekBtn.setPreferredSize(new Dimension(230, 36));
+        startSeekBtn.setPreferredSize(new Dimension(250, 40));
         startSeekBtn.setThemeColors(new Color(254, 243, 199), new Color(253, 230, 138), new Color(252, 211, 77), new Color(180, 83, 9));
         startSeekBtn.setEnabled(false);
         
@@ -414,7 +414,7 @@ public class NoSqlGui {
         consoleScroll.setBorder(new RoundedBorder(12, new Color(226, 232, 240))); 
         consoleCard.add(consoleScroll, BorderLayout.CENTER);
 
-        consoleInputField = new FlatTextField("", 20);
+        consoleInputField = new FlatTextField("", 25);
         consoleInputField.setBackground(COLOR_CARD);
         consoleInputField.setToolTipText("输入命令，敲击回车执行");
         consoleInputField.setEnabled(false);
@@ -424,16 +424,16 @@ public class NoSqlGui {
         JSplitPane bottomSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, seekCard, consoleCard);
         bottomSplit.setBackground(COLOR_BG);
         bottomSplit.setOpaque(true);
-        bottomSplit.setDividerSize(6);
-        bottomSplit.setDividerLocation(220); 
+        bottomSplit.setDividerSize(8);
+        bottomSplit.setDividerLocation(230);
         bottomSplit.setContinuousLayout(true);
         bottomSplit.setBorder(BorderFactory.createEmptyBorder());
 
         JSplitPane topSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, chartCard, bottomSplit);
         topSplit.setBackground(COLOR_BG);
         topSplit.setOpaque(true);
-        topSplit.setDividerSize(6);
-        topSplit.setDividerLocation(240); 
+        topSplit.setDividerSize(8);
+        topSplit.setDividerLocation(250);
         topSplit.setContinuousLayout(true);
         topSplit.setBorder(BorderFactory.createEmptyBorder());
 
@@ -448,10 +448,10 @@ public class NoSqlGui {
         editorPanel.setLayout(new BoxLayout(editorPanel, BoxLayout.Y_AXIS));
 
         RoundedPanel editorHeaderCard = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
-        editorHeaderCard.setLayout(new BorderLayout(20, 0));
-        editorHeaderCard.setBorder(new EmptyBorder(18, 22, 18, 22)); 
-        editorHeaderCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
-        editorHeaderCard.setPreferredSize(new Dimension(0, 80)); 
+        editorHeaderCard.setLayout(new BorderLayout(24, 0));
+        editorHeaderCard.setBorder(new EmptyBorder(20, 24, 20, 24));
+        editorHeaderCard.setMaximumSize(new Dimension(Integer.MAX_VALUE, 90));
+        editorHeaderCard.setPreferredSize(new Dimension(0, 90));
 
         JPanel headerLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 0));
         headerLeft.setBackground(COLOR_CARD);
@@ -478,15 +478,15 @@ public class NoSqlGui {
         ttlStatusLabel.setForeground(COLOR_MUTED);
         ttlStatusLabel.setFont(FONT_BOLD); 
         
-        setTtlField = new FlatTextField("", 5);
+        setTtlField = new FlatTextField("", 6);
         setTtlField.setToolTipText("秒数");
-        saveTtlBtn = new FlatButton("设置");
+        saveTtlBtn = new FlatButton("设置 TTL");
         saveTtlBtn.setThemeColors(new Color(254, 243, 199), new Color(253, 230, 138), new Color(252, 211, 77), new Color(180, 83, 9));
-        saveTtlBtn.setPreferredSize(new Dimension(75, 36));
+        saveTtlBtn.setPreferredSize(new Dimension(95, 38));
 
         deleteKeyBtn = new FlatButton("🗑️ 删除键");
         deleteKeyBtn.setThemeColors(new Color(254, 226, 226), new Color(254, 202, 202), new Color(252, 165, 165), new Color(220, 38, 38));
-        deleteKeyBtn.setPreferredSize(new Dimension(100, 36));
+        deleteKeyBtn.setPreferredSize(new Dimension(110, 38));
 
         headerRight.add(ttlStatusLabel);
         headerRight.add(setTtlField);
@@ -505,8 +505,8 @@ public class NoSqlGui {
         RoundedPanel stringPanel = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
         stringPanel.setLayout(new BorderLayout(0, 12));
         stringPanel.setBorder(new EmptyBorder(18, 18, 18, 18));
-        stringPanel.setPreferredSize(new Dimension(0, 480)); 
-        
+        stringPanel.setPreferredSize(new Dimension(0, 500));
+
         stringTextArea = new JTextArea();
         stringTextArea.setBackground(new Color(248, 250, 252));
         stringTextArea.setForeground(COLOR_TEXT);
@@ -521,7 +521,7 @@ public class NoSqlGui {
         JPanel stringCtrl = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         stringCtrl.setBackground(COLOR_CARD);
         saveStringBtn = new FlatButton("💾 保存修改");
-        saveStringBtn.setPreferredSize(new Dimension(160, 38));
+        saveStringBtn.setPreferredSize(new Dimension(170, 42));
         saveStringBtn.setThemeColors(new Color(239, 246, 255), new Color(219, 234, 254), new Color(191, 219, 254), COLOR_ACCENT);
         stringCtrl.add(saveStringBtn);
         stringPanel.add(stringCtrl, BorderLayout.SOUTH);
@@ -546,11 +546,11 @@ public class NoSqlGui {
         JPanel tableCtrl = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 0));
         tableCtrl.setBackground(COLOR_CARD);
         addRowBtn = new FlatButton("➕ 增加行");
-        addRowBtn.setPreferredSize(new Dimension(110, 36));
+        addRowBtn.setPreferredSize(new Dimension(120, 40));
         addRowBtn.setThemeColors(new Color(236, 253, 245), new Color(209, 250, 229), new Color(167, 243, 208), new Color(4, 120, 87));
-        
+
         removeRowBtn = new FlatButton("➖ 删除选中行");
-        removeRowBtn.setPreferredSize(new Dimension(140, 36));
+        removeRowBtn.setPreferredSize(new Dimension(150, 40));
         removeRowBtn.setThemeColors(new Color(254, 226, 226), new Color(254, 202, 202), new Color(252, 165, 165), new Color(220, 38, 38));
         
         tableCtrl.add(addRowBtn);
@@ -576,8 +576,8 @@ public class NoSqlGui {
         JSplitPane mainSplitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, sidebarPanel, rightScrollPane);
         mainSplitPane.setBackground(COLOR_BG);
         mainSplitPane.setOpaque(true);
-        mainSplitPane.setDividerSize(8); 
-        mainSplitPane.setDividerLocation(380); 
+        mainSplitPane.setDividerSize(10);
+        mainSplitPane.setDividerLocation(420);
         mainSplitPane.setContinuousLayout(true);
         mainSplitPane.setBorder(BorderFactory.createEmptyBorder());
 
@@ -1256,19 +1256,19 @@ public class NoSqlGui {
         if (sdk == null) return;
 
         JDialog dialog = new JDialog(frame, "➕ 新建数据键 (Add New Key)", true);
-        dialog.setSize(480, 420); 
+        dialog.setSize(520, 460);
         dialog.setLocationRelativeTo(frame);
-        
-        JPanel p = new JPanel(new BorderLayout(15, 15));
+
+        JPanel p = new JPanel(new BorderLayout(18, 18));
         p.setBackground(Color.WHITE);
-        p.setBorder(new EmptyBorder(22, 25, 22, 25));
-        
+        p.setBorder(new EmptyBorder(24, 28, 24, 28));
+
         JPanel form = new JPanel(new GridBagLayout());
         form.setBackground(Color.WHITE);
-        
+
         GridBagConstraints g = new GridBagConstraints();
         g.fill = GridBagConstraints.HORIZONTAL;
-        g.insets = new Insets(6, 0, 6, 0);
+        g.insets = new Insets(8, 0, 8, 0);
         g.gridx = 0;
 
         g.gridy = 0;
