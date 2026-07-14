@@ -1703,7 +1703,9 @@ public class NoSqlGui {
             if (curTotalCommands > 0) {
                 if (prevTotalCommands > 0 && now > prevInfoTime) {
                     double seconds = (double) (now - prevInfoTime) / 1000.0;
-                    qpsVal = Math.max(0, Math.round((curTotalCommands - prevTotalCommands) / seconds));
+                    // 减掉 DBSIZE 这 1 次监控命令（INFO 服务端不计入 totalCommands）
+                    long realDelta = Math.max(0, curTotalCommands - prevTotalCommands - 1);
+                    qpsVal = Math.round(realDelta / seconds);
                 } else if (prevTotalCommands == 0) {
                     // 第一次连接，初始化计数器
                     qpsVal = 0;
