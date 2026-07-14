@@ -119,6 +119,82 @@ public class NoSqlSdk implements AutoCloseable {
     }
 
     // ==========================================
+    // 便捷 API 方法（对应指导书 Java SDK 2.1.2 核心命令 API）
+    // ==========================================
+
+    /**
+     * 存储键值对
+     */
+    public String set(String key, String value) throws Exception {
+        Object result = sendCommand(List.of("SET", key, value));
+        return result != null ? result.toString() : null;
+    }
+
+    /**
+     * 获取键对应的值
+     */
+    public String get(String key) throws Exception {
+        return (String) sendCommand(List.of("GET", key));
+    }
+
+    /**
+     * 删除键值对，返回删除数量
+     */
+    public long del(String... keys) throws Exception {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("DEL");
+        cmd.addAll(List.of(keys));
+        Object result = sendCommand(cmd);
+        return result instanceof Long ? (Long) result : 0L;
+    }
+
+    /**
+     * 列出所有键（支持通配符）
+     */
+    @SuppressWarnings("unchecked")
+    public List<String> keys(String pattern) throws Exception {
+        Object result = sendCommand(List.of("KEYS", pattern != null ? pattern : "*"));
+        if (result instanceof List) {
+            return (List<String>) result;
+        }
+        return List.of();
+    }
+
+    /**
+     * 检查键是否存在
+     */
+    public boolean exists(String key) throws Exception {
+        Object result = sendCommand(List.of("EXISTS", key));
+        if (result instanceof Long) {
+            return (Long) result > 0;
+        }
+        return false;
+    }
+
+    /**
+     * 清空所有数据
+     */
+    public String flush() throws Exception {
+        Object result = sendCommand(List.of("FLUSHALL"));
+        return result != null ? result.toString() : null;
+    }
+
+    /**
+     * 发送 PING 命令
+     */
+    public String ping() throws Exception {
+        return (String) sendCommand(List.of("PING"));
+    }
+
+    /**
+     * 获取数据库键总数
+     */
+    public long dbSize() throws Exception {
+        Object result = sendCommand(List.of("DBSIZE"));
+        return result instanceof Long ? (Long) result : 0L;
+    }
+
+    // ==========================================
     // 兼容原有接口的方法（内部转换为 Redis 命令）
     // ==========================================
 

@@ -1,6 +1,6 @@
 @echo off
 echo ===================================================
-4: echo  NoSQL Redis Desktop Manager Launcher
+echo  NoSQL Redis Desktop Manager Launcher
 echo ===================================================
 :: Check if gui.jar exists in dist
 if not exist dist\gui.jar (

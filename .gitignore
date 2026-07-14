@@ -3,8 +3,8 @@ bin/
 test-bin/
 out/
 
-# JAR 分发
-dist/
+# 分发目录（保留 JAR 用于课程提交，忽略临时数据）
+dist/data/
 
 # IDE
 .idea/
@@ -12,15 +12,21 @@ dist/
 .classpath
 .project
 .settings/
+.vscode/
 
 # 数据目录（运行时生成）
 data/
 
 # 临时文件
 *.tmp
+*.7z
+~$*
 compile_list.txt
 sources_test.txt
 test_files.txt
+_src_list.txt
+_build.py
+_extract_pdf.py
 
 # OS 文件
 .DS_Store

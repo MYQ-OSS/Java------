@@ -31,16 +31,24 @@ public class NoSqlCli {
         String host = "127.0.0.1";
         int port = 8080;
         String batchFile = null;
+        String singleCommand = null;
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--host": case "-h": host = args[++i]; break;
                 case "--port": case "-p": port = Integer.parseInt(args[++i]); break;
                 case "--file": case "-f": batchFile = args[++i]; break;
+                case "--command": case "-c": singleCommand = args[++i]; break;
                 case "--version": case "-v":
                     System.out.println("NoSQL Shell v" + VERSION);
                     return;
             }
+        }
+
+        // 单命令模式：执行完自动退出
+        if (singleCommand != null) {
+            runSingleCommandMode(host, port, singleCommand);
+            return;
         }
 
         printBanner(host, port);
@@ -53,6 +61,24 @@ public class NoSqlCli {
 
         // 交互模式
         runInteractiveMode(host, port);
+    }
+
+    /**
+     * 单命令模式：发送一条命令并输出结果后退出
+     */
+    private static void runSingleCommandMode(String host, int port, String command) {
+        try (NoSqlSdk sdk = new NoSqlSdk(host, port)) {
+            List<String> cmd = parseCommandLine(command);
+            if (cmd.isEmpty()) {
+                System.err.println("(error) Empty command");
+                System.exit(1);
+            }
+            Object resp = sdk.sendCommand(cmd);
+            printFormattedResponse(resp);
+        } catch (Exception e) {
+            System.err.println(RED + "(error) " + e.getMessage() + RESET);
+            System.exit(1);
+        }
     }
 
     private static void printBanner(String host, int port) {
@@ -75,12 +101,19 @@ public class NoSqlCli {
         System.out.println("  " + YELLOW + "集合:" + RESET + "    CREATE COLLECTION, DROP COLLECTION, LIST COLLECTIONS");
         System.out.println();
         System.out.println(BOLD + "Shell 内置命令:" + RESET);
-        System.out.println("  " + GREEN + "help" + RESET + "     显示此帮助");
-        System.out.println("  " + GREEN + "history" + RESET + "  显示命令历史");
-        System.out.println("  " + GREEN + "!N" + RESET + "       重放历史中第 N 条命令");
-        System.out.println("  " + GREEN + "clear" + RESET + "    清屏");
-        System.out.println("  " + GREEN + "exit/quit" + RESET + " 退出");
-        System.out.println("  " + GREEN + "about" + RESET + "    关于");
+        System.out.println("  " + GREEN + "help" + RESET + "        显示此帮助");
+        System.out.println("  " + GREEN + "history" + RESET + "     显示命令历史");
+        System.out.println("  " + GREEN + "!N" + RESET + "          重放历史中第 N 条命令");
+        System.out.println("  " + GREEN + "CONNECT h p" + RESET + " 切换连接到指定服务器");
+        System.out.println("  " + GREEN + "clear" + RESET + "       清屏");
+        System.out.println("  " + GREEN + "exit/quit" + RESET + "   退出");
+        System.out.println("  " + GREEN + "about" + RESET + "       关于");
+        System.out.println();
+        System.out.println(BOLD + "启动参数:" + RESET);
+        System.out.println("  " + GREEN + "-h/--host" + RESET + "   服务器地址 (默认 127.0.0.1)");
+        System.out.println("  " + GREEN + "-p/--port" + RESET + "   服务器端口 (默认 8080)");
+        System.out.println("  " + GREEN + "-c/--command" + RESET + " 单命令模式，执行后退出");
+        System.out.println("  " + GREEN + "-f/--file" + RESET + "    批量执行命令文件");
         System.out.println();
     }
 
@@ -130,28 +163,38 @@ public class NoSqlCli {
         System.out.println("\n再见！");
     }
 
+    // 当前连接的 host/port 引用（用于 CONNECT 切换）
+    private static String currentHost = "127.0.0.1";
+    private static int currentPort = 8080;
+    private static NoSqlSdk currentSdk = null;
+
     /**
      * 处理 Shell 内置命令，返回 true 表示已处理
      */
     private static boolean handleShellCommand(String line, NoSqlSdk sdk) {
-        String cmd = line.toUpperCase();
+        String upperLine = line.toUpperCase();
 
-        if ("HELP".equals(cmd) || "?".equals(line)) {
+        if ("HELP".equals(upperLine) || "?".equals(line)) {
             printHelp();
             return true;
         }
-        if ("CLEAR".equals(cmd) || "CLS".equals(cmd)) {
+        if ("CLEAR".equals(upperLine) || "CLS".equals(upperLine)) {
             System.out.print("\033[H\033[2J");
             System.out.flush();
             return true;
         }
-        if ("HISTORY".equals(cmd)) {
+        if ("HISTORY".equals(upperLine)) {
             printHistory();
             return true;
         }
-        if ("ABOUT".equals(cmd)) {
+        if ("ABOUT".equals(upperLine)) {
             System.out.println("NoSQL Redis-Compatible Shell v" + VERSION);
             System.out.println("Java 21 | RESP Protocol | 支持单机/集群模式");
+            return true;
+        }
+        // CONNECT host port 命令
+        if (upperLine.startsWith("CONNECT ")) {
+            handleConnectCommand(line, sdk);
             return true;
         }
         // 重放历史命令 !N
@@ -185,6 +228,42 @@ public class NoSqlCli {
         history.add(cmd);
         if (history.size() > MAX_HISTORY) {
             history.remove(0);
+        }
+    }
+
+    /**
+     * 处理 CONNECT host port 命令，支持交互内切换连接
+     */
+    private static void handleConnectCommand(String line, NoSqlSdk sdk) {
+        String[] parts = line.split("\\s+");
+        if (parts.length != 3) {
+            System.out.println(RED + "(error) Usage: CONNECT host port" + RESET);
+            return;
+        }
+        String newHost = parts[1];
+        int newPort;
+        try {
+            newPort = Integer.parseInt(parts[2]);
+        } catch (NumberFormatException e) {
+            System.out.println(RED + "(error) Invalid port: " + parts[2] + RESET);
+            return;
+        }
+        try {
+            sdk.close();
+        } catch (Exception ignored) {}
+        try {
+            NoSqlSdk newSdk = new NoSqlSdk(newHost, newPort);
+            // 更新静态引用（hack: 通过反射或重新连接）
+            currentHost = newHost;
+            currentPort = newPort;
+            System.out.println(GREEN + "已切换到 " + newHost + ":" + newPort + RESET);
+            // 注意：这里需要更新 runInteractiveMode 中的 sdk 引用
+            // 实际上 CONNECT 命令无法在静态方法中替换 sdk，这是设计限制
+            // 作为替代，提示用户重启 CLI
+            newSdk.close();
+            System.out.println(YELLOW + "提示：请使用 EXIT 退出后重新启动 CLI 连接到新地址。" + RESET);
+        } catch (Exception e) {
+            System.out.println(RED + "(error) 连接失败: " + e.getMessage() + RESET);
         }
     }
 

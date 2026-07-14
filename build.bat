@@ -29,12 +29,14 @@ jar cfe dist\server.jar nosql.server.DatabaseServer -C bin .
 jar cfe dist\cli.jar nosql.client.NoSqlCli -C bin .
 jar cfe dist\gui.jar nosql.client.NoSqlGui -C bin .
 jar cfe dist\benchmark.jar nosql.benchmark.BenchmarkTool -C bin .
+jar cfe dist\shell.jar nosql.client.ShellClient -C bin .
 
 echo [SUCCESS] JAR packages generated in dist/ directory:
 echo   - dist/server.jar (Database Server)
 echo   - dist/cli.jar (Interactive CLI Client)
 echo   - dist/gui.jar (Swing GUI Client)
 echo   - dist/benchmark.jar (Stress Benchmark Tool)
+echo   - dist/shell.jar (Shell Command Tool)
 
 :: 4. Clean up temp files
 rmdir /s /q bin

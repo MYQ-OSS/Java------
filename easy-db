@@ -1,0 +1,21 @@
+#!/bin/bash
+# ============================================================
+#  easy-db Shell Tool 包装脚本 (Linux/macOS)
+#  用法: easy-db <command> [args...]
+#  示例: easy-db set name 张三
+# ============================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JAR_PATH="$SCRIPT_DIR/dist/shell.jar"
+
+# 解析环境变量
+EASY_DB_HOST="${EASY_DB_HOST:-127.0.0.1}"
+EASY_DB_PORT="${EASY_DB_PORT:-8080}"
+
+if [ ! -f "$JAR_PATH" ]; then
+    echo "[easy-db] shell.jar not found at $JAR_PATH"
+    echo "[easy-db] Please run build.bat first to compile the project."
+    exit 1
+fi
+
+java -jar "$JAR_PATH" "$@"

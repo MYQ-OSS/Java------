@@ -31,6 +31,8 @@ public class DatabaseServer implements AutoCloseable {
         this.database = new Database(dataDir, rotateThreshold);
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
         this.restfulDispatcher = new RestfulDispatcher();
+        this.restfulDispatcher.setDatabase(this.database);
+        this.restfulDispatcher.registerDefaultRoutes(); // 注册 HTTP API 路由
 
         if ("cluster".equalsIgnoreCase(mode)) {
             this.clusterManager = new ClusterManager(nodeId, port, peersStr, this.database);
@@ -67,10 +69,95 @@ public class DatabaseServer implements AutoCloseable {
     }
 
     private void handleClient(Socket socket) {
+        try {
+            // 探测连接类型：使用 BufferedInputStream 支持 mark/reset
+            socket.setSoTimeout(2000); // 2秒超时用于协议探测
+            BufferedInputStream bis = new BufferedInputStream(socket.getInputStream());
+            bis.mark(4);
+            int firstByte = bis.read();
+
+            if (firstByte == 'G' || firstByte == 'P' || firstByte == 'D' || firstByte == 'H' || firstByte == 'O') {
+                // 可能是 HTTP 请求
+                bis.reset(); // 回退已读字节
+                // 将 BufferedInputStream 包装后的 socket 传入 HTTP 处理器
+                handleHttpClient(socket, bis);
+                return;
+            }
+            // RESP 协议：首字节通常是 '*'（数组）或 '+'（简单字符串）
+            if (firstByte == '*' || firstByte == '+') {
+                bis.reset();
+                handleRespClient(socket, bis);
+                return;
+            }
+            // 无法识别的协议
+            System.out.println("[Server] Unknown protocol, first byte: 0x" +
+                Integer.toHexString(firstByte) + " (" + (char)firstByte + ")");
+            socket.close();
+        } catch (java.net.SocketTimeoutException e) {
+            // 超时后按 RESP 处理
+            handleRespClient(socket, null);
+        } catch (IOException e) {
+            try { socket.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    /**
+     * HTTP 请求处理器
+     */
+    private void handleHttpClient(Socket socket, BufferedInputStream bis) {
         try (
-            InputStream in = socket.getInputStream();
-            OutputStream out = socket.getOutputStream()
+            BufferedReader reader = new BufferedReader(
+                new java.io.InputStreamReader(bis, java.nio.charset.StandardCharsets.UTF_8));
+            java.io.PrintWriter writer = new java.io.PrintWriter(
+                new java.io.OutputStreamWriter(socket.getOutputStream(), java.nio.charset.StandardCharsets.UTF_8), true)
         ) {
+            socket.setSoTimeout(30000); // 30秒超时
+
+            // 1. 解析 HTTP 请求
+            HttpRequest request = HttpRequest.parse(reader);
+            if (request == null) {
+                writer.println(HttpResponse.badRequest("Invalid HTTP request").toHttpString());
+                return;
+            }
+
+            System.out.println("[HTTP] " + request.getMethod() + " " + request.getPath());
+
+            // 2. 处理 OPTIONS 预检请求（CORS）
+            if ("OPTIONS".equals(request.getMethod())) {
+                writer.println(HttpResponse.ok("OK").toHttpString());
+                return;
+            }
+
+            // 3. 查找路由
+            RouteHandler handler = restfulDispatcher.findHandler(request.getMethod(), request.getPath());
+            if (handler == null) {
+                writer.println(HttpResponse.notFound(
+                    "Route not found: " + request.getMethod() + " " + request.getPath()).toHttpString());
+                return;
+            }
+
+            // 4. 执行处理
+            HttpResponse response = handler.handle(request);
+
+            // 5. 返回响应
+            writer.println(response.toHttpString());
+            writer.flush();
+
+        } catch (Exception e) {
+            System.err.println("[HTTP] Error: " + e.getMessage());
+        } finally {
+            try { socket.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    /**
+     * RESP 协议客户端处理器（原有逻辑）
+     */
+    private void handleRespClient(Socket socket, BufferedInputStream bis) {
+        try {
+            // 使用传入的 BufferedInputStream 或创建新的
+            InputStream in = bis != null ? bis : socket.getInputStream();
+            OutputStream out = socket.getOutputStream();
             socket.setSoTimeout(0); // 维持长连接，不超时
 
             while (running && !socket.isClosed()) {

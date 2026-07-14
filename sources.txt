@@ -1,7 +1,9 @@
 src/nosql/benchmark/BenchmarkTool.java
+src/nosql/client/DatabaseException.java
 src/nosql/client/NoSqlCli.java
 src/nosql/client/NoSqlGui.java
 src/nosql/client/NoSqlSdk.java
+src/nosql/client/ShellClient.java
 src/nosql/cluster/ClusterManager.java
 src/nosql/common/DbValue.java
 src/nosql/common/RespParser.java
@@ -10,7 +12,10 @@ src/nosql/server/Database.java
 src/nosql/server/DatabaseServer.java
 src/nosql/server/Engine.java
 src/nosql/server/HashIndex.java
+src/nosql/server/HttpRequest.java
+src/nosql/server/HttpResponse.java
 src/nosql/server/L2Cache.java
 src/nosql/server/LruCache.java
 src/nosql/server/RestfulDispatcher.java
+src/nosql/server/RouteHandler.java
 src/nosql/server/SSTable.java

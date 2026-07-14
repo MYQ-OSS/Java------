@@ -44,7 +44,10 @@ public class NoSqlGui {
     private FlatTextField opValField;
     private JComboBox<String> opTypeCombo;
     private FlatButton opWriteBtn;
+    private FlatButton opGetBtn;
     private FlatButton opDelBtn;
+    private FlatButton opExistsBtn;
+    private FlatButton opKeysBtn;
     private FlatButton opTtlBtn;
 
     // 右侧主工作区 (带有主滚动条，排版自适应)
@@ -221,7 +224,7 @@ public class NoSqlGui {
         RoundedPanel quickOpCard = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
         quickOpCard.setLayout(new GridBagLayout());
         quickOpCard.setBorder(new EmptyBorder(18, 18, 18, 18));
-        quickOpCard.setPreferredSize(new Dimension(0, 290)); 
+        quickOpCard.setPreferredSize(new Dimension(0, 340)); 
 
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.fill = GridBagConstraints.HORIZONTAL;
@@ -263,24 +266,39 @@ public class NoSqlGui {
         gbc.gridy = 3;
         quickOpCard.add(opTypeRow, gbc);
 
-        // 操作按钮组合
-        JPanel opBtnRow = new JPanel(new GridLayout(1, 3, 8, 0));
+        // 操作按钮组合（2行3列：写入/读取/删除 + 检查/列出/生命周期）
+        JPanel opBtnRow = new JPanel(new GridLayout(2, 3, 8, 6));
         opBtnRow.setBackground(COLOR_CARD);
-        
-        opWriteBtn = new FlatButton("写入");
+
+        opWriteBtn = new FlatButton("写入 SET");
         opWriteBtn.setThemeColors(new Color(236, 253, 245), new Color(209, 250, 229), new Color(167, 243, 208), new Color(4, 120, 87));
         opWriteBtn.setEnabled(false);
-        
-        opDelBtn = new FlatButton("删除");
+
+        opGetBtn = new FlatButton("读取 GET");
+        opGetBtn.setThemeColors(new Color(239, 246, 255), new Color(219, 234, 254), new Color(191, 219, 254), COLOR_ACCENT);
+        opGetBtn.setEnabled(false);
+
+        opDelBtn = new FlatButton("删除 DEL");
         opDelBtn.setThemeColors(new Color(254, 226, 226), new Color(254, 202, 202), new Color(252, 165, 165), new Color(220, 38, 38));
         opDelBtn.setEnabled(false);
 
-        opTtlBtn = new FlatButton("生命");
+        opExistsBtn = new FlatButton("检查 EXISTS");
+        opExistsBtn.setThemeColors(new Color(248, 250, 252), new Color(241, 245, 249), new Color(226, 232, 240), COLOR_MUTED);
+        opExistsBtn.setEnabled(false);
+
+        opKeysBtn = new FlatButton("列出 KEYS");
+        opKeysBtn.setThemeColors(new Color(248, 250, 252), new Color(241, 245, 249), new Color(226, 232, 240), COLOR_MUTED);
+        opKeysBtn.setEnabled(false);
+
+        opTtlBtn = new FlatButton("生命 TTL");
         opTtlBtn.setThemeColors(new Color(254, 243, 199), new Color(253, 230, 138), new Color(252, 211, 77), new Color(180, 83, 9));
         opTtlBtn.setEnabled(false);
 
         opBtnRow.add(opWriteBtn);
+        opBtnRow.add(opGetBtn);
         opBtnRow.add(opDelBtn);
+        opBtnRow.add(opExistsBtn);
+        opBtnRow.add(opKeysBtn);
         opBtnRow.add(opTtlBtn);
         
         gbc.gridy = 4;
@@ -580,7 +598,10 @@ public class NoSqlGui {
         startSeekBtn.addActionListener(e -> handleSeekSimulation());
         
         opWriteBtn.addActionListener(e -> handleOpWrite());
+        opGetBtn.addActionListener(e -> handleOpGet());
         opDelBtn.addActionListener(e -> handleOpDelete());
+        opExistsBtn.addActionListener(e -> handleOpExists());
+        opKeysBtn.addActionListener(e -> handleOpKeys());
         opTtlBtn.addActionListener(e -> handleOpTtl());
 
         searchField.addActionListener(e -> handleRefreshKeys());
@@ -788,9 +809,12 @@ public class NoSqlGui {
             consoleInputField.setEnabled(false);
             
             opWriteBtn.setEnabled(false);
+            opGetBtn.setEnabled(false);
             opDelBtn.setEnabled(false);
+            opExistsBtn.setEnabled(false);
+            opKeysBtn.setEnabled(false);
             opTtlBtn.setEnabled(false);
-            
+
             statusLabel.setText("运行状态: 未连接");
             qpsTimer.stop();
             prevOperations = 0;
@@ -819,7 +843,10 @@ public class NoSqlGui {
             consoleInputField.setEnabled(true);
             
             opWriteBtn.setEnabled(true);
+            opGetBtn.setEnabled(true);
             opDelBtn.setEnabled(true);
+            opExistsBtn.setEnabled(true);
+            opKeysBtn.setEnabled(true);
             opTtlBtn.setEnabled(true);
             
             statusLabel.setText("已成功连接至 " + host + ":" + port);
@@ -894,6 +921,75 @@ public class NoSqlGui {
         }
     }
 
+    private void handleOpGet() {
+        if (sdk == null) return;
+        String key = opKeyField.getText().trim();
+        if (key.isEmpty()) {
+            showMsg("读取警告", "请输入要读取的键名。", true);
+            return;
+        }
+        try {
+            String val = (String) sdk.sendCommand(List.of("GET", key));
+            if (val != null) {
+                opValField.setText(val);
+                consoleOutputArea.append("读取键 " + key + ": " + val + "\n");
+            } else {
+                opValField.setText("");
+                showMsg("读取结果", "键 " + key + " 不存在 (nil)。", false);
+            }
+        } catch (Exception ex) {
+            showMsg("读取失败", "操作异常: " + ex.getMessage(), true);
+        }
+    }
+
+    private void handleOpExists() {
+        if (sdk == null) return;
+        String key = opKeyField.getText().trim();
+        if (key.isEmpty()) {
+            showMsg("检查警告", "请输入要检查的键名。", true);
+            return;
+        }
+        try {
+            Long count = (Long) sdk.sendCommand(List.of("EXISTS", key));
+            boolean exists = count != null && count > 0;
+            if (exists) {
+                showMsg("键存在", "键 " + key + " 存在于数据库中。", false);
+                consoleOutputArea.append("EXISTS " + key + " → true\n");
+            } else {
+                showMsg("键不存在", "键 " + key + " 不存在。", false);
+                consoleOutputArea.append("EXISTS " + key + " → false\n");
+            }
+        } catch (Exception ex) {
+            showMsg("检查失败", "操作异常: " + ex.getMessage(), true);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void handleOpKeys() {
+        if (sdk == null) return;
+        String pattern = opKeyField.getText().trim();
+        if (pattern.isEmpty()) pattern = "*";
+        try {
+            List<Object> keys = (List<Object>) sdk.sendCommand(List.of("KEYS", pattern));
+            if (keys != null && !keys.isEmpty()) {
+                StringBuilder sb = new StringBuilder("匹配 " + pattern + " 的键 (共 " + keys.size() + " 个):\n");
+                int i = 1;
+                for (Object k : keys) {
+                    sb.append("  ").append(i++).append(") ").append(k).append("\n");
+                }
+                showMsg("KEYS 查询结果", sb.toString(), false);
+                consoleOutputArea.append("KEYS " + pattern + " → " + keys.size() + " 个键\n");
+            } else {
+                showMsg("KEYS 查询结果", "没有键匹配模式: " + pattern, false);
+                consoleOutputArea.append("KEYS " + pattern + " → 0 个键\n");
+            }
+            // 同步刷新树
+            handleRefreshKeys();
+        } catch (Exception ex) {
+            showMsg("KEYS 失败", "操作异常: " + ex.getMessage(), true);
+        }
+    }
+
     private void handleOpDelete() {
         if (sdk == null) return;
         String key = opKeyField.getText().trim();
@@ -907,7 +1003,7 @@ public class NoSqlGui {
             if (success > 0) {
                 opKeyField.setText("");
                 opValField.setText("");
-                
+
                 // 🚨 动态刷新并踢回主页
                 handleRefreshKeys();
                 if (key.equals(currentEditingKey)) {
