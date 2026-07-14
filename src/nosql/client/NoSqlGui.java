@@ -49,6 +49,7 @@ public class NoSqlGui {
     private FlatButton opExistsBtn;
     private FlatButton opKeysBtn;
     private FlatButton opTtlBtn;
+    private FlatButton msetBtn;
 
     // 右侧主工作区 (带有主滚动条，排版自适应)
     private JPanel rightMainPanel;
@@ -304,6 +305,17 @@ public class NoSqlGui {
         gbc.gridy = 4;
         gbc.insets = new Insets(12, 0, 4, 0);
         quickOpCard.add(opBtnRow, gbc);
+
+        // MSET 批量写入按钮行
+        JPanel msetRow = new JPanel(new BorderLayout());
+        msetRow.setBackground(COLOR_CARD);
+        msetBtn = new FlatButton("📦 MSET 批量写入");
+        msetBtn.setThemeColors(new Color(236, 253, 245), new Color(209, 250, 229), new Color(167, 243, 208), new Color(4, 120, 87));
+        msetBtn.setEnabled(false);
+        msetRow.add(msetBtn, BorderLayout.CENTER);
+        gbc.gridy = 5;
+        gbc.insets = new Insets(4, 0, 0, 0);
+        quickOpCard.add(msetRow, gbc);
 
         sidebarPanel.add(quickOpCard, BorderLayout.SOUTH);
 
@@ -603,6 +615,7 @@ public class NoSqlGui {
         opExistsBtn.addActionListener(e -> handleOpExists());
         opKeysBtn.addActionListener(e -> handleOpKeys());
         opTtlBtn.addActionListener(e -> handleOpTtl());
+        msetBtn.addActionListener(e -> handleMsetDialog());
 
         searchField.addActionListener(e -> handleRefreshKeys());
         consoleInputField.addActionListener(e -> handleConsoleCommand());
@@ -814,6 +827,7 @@ public class NoSqlGui {
             opExistsBtn.setEnabled(false);
             opKeysBtn.setEnabled(false);
             opTtlBtn.setEnabled(false);
+            msetBtn.setEnabled(false);
 
             statusLabel.setText("运行状态: 未连接");
             qpsTimer.stop();
@@ -848,7 +862,8 @@ public class NoSqlGui {
             opExistsBtn.setEnabled(true);
             opKeysBtn.setEnabled(true);
             opTtlBtn.setEnabled(true);
-            
+            msetBtn.setEnabled(true);
+
             statusLabel.setText("已成功连接至 " + host + ":" + port);
             consoleOutputArea.append("已成功连接至服务端: " + host + ":" + port + "\n");
             
@@ -1051,6 +1066,119 @@ public class NoSqlGui {
         } catch (Exception ex) {
             showMsg("操作异常", "生命周期设置失败: " + ex.getMessage(), true);
         }
+    }
+
+    // ==========================================
+    // 9b. MSET 批量插入对话框
+    // ==========================================
+    @SuppressWarnings("unchecked")
+    private void handleMsetDialog() {
+        if (sdk == null) return;
+
+        JDialog dialog = new JDialog(frame, "📦 MSET 批量写入", true);
+        dialog.setSize(600, 480);
+        dialog.setLocationRelativeTo(frame);
+
+        JPanel p = new JPanel(new BorderLayout(15, 15));
+        p.setBackground(Color.WHITE);
+        p.setBorder(new EmptyBorder(20, 24, 20, 24));
+
+        JLabel tip = new JLabel("<html><b>每行一条</b>，格式：<code>key = value</code>，空行和 # 注释行自动跳过</html>");
+        tip.setFont(FONT_TEXT);
+
+        JTextArea inputArea = new JTextArea();
+        inputArea.setFont(FONT_CODE);
+        inputArea.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+        inputArea.setLineWrap(true);
+        inputArea.setWrapStyleWord(true);
+        inputArea.setText("# 示例：批量插入用户数据\nuser:1 = 张三\nuser:2 = 李四\nuser:3 = 王五\nscore:math = 95\nscore:eng = 87\n");
+
+        JScrollPane scroll = new JScrollPane(inputArea);
+        scroll.setBorder(new RoundedBorder(10, new Color(226, 232, 240)));
+
+        JLabel resultLabel = new JLabel(" ");
+        resultLabel.setFont(FONT_TEXT);
+
+        JPanel bottom = new JPanel(new BorderLayout(15, 0));
+        bottom.setBackground(Color.WHITE);
+
+        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 12, 0));
+        btnPanel.setBackground(Color.WHITE);
+
+        FlatButton cancelBtn = new FlatButton("取消");
+        cancelBtn.setPreferredSize(new Dimension(85, 36));
+        cancelBtn.setThemeColors(new Color(241, 245, 249), new Color(226, 232, 240), new Color(203, 213, 225), COLOR_TEXT);
+
+        FlatButton execBtn = new FlatButton("▶ 执行批量写入");
+        execBtn.setPreferredSize(new Dimension(160, 40));
+        execBtn.setThemeColors(new Color(236, 253, 245), new Color(209, 250, 229), new Color(167, 243, 208), new Color(4, 120, 87));
+
+        btnPanel.add(cancelBtn);
+        btnPanel.add(execBtn);
+
+        bottom.add(resultLabel, BorderLayout.WEST);
+        bottom.add(btnPanel, BorderLayout.EAST);
+
+        p.add(tip, BorderLayout.NORTH);
+        p.add(scroll, BorderLayout.CENTER);
+        p.add(bottom, BorderLayout.SOUTH);
+
+        dialog.setContentPane(p);
+
+        execBtn.addActionListener(ev -> {
+            String text = inputArea.getText().trim();
+            if (text.isEmpty()) {
+                resultLabel.setText("⚠️ 请输入要写入的键值对");
+                return;
+            }
+
+            String[] lines = text.split("\n");
+            List<String> msetArgs = new ArrayList<>();
+            int totalPairs = 0, skipped = 0;
+
+            for (String line : lines) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) {
+                    if (!line.isEmpty()) skipped++;
+                    continue;
+                }
+                int eq = line.indexOf('=');
+                if (eq < 0) {
+                    skipped++;
+                    continue;
+                }
+                String key = line.substring(0, eq).trim();
+                String val = line.substring(eq + 1).trim();
+                if (key.isEmpty()) { skipped++; continue; }
+                msetArgs.add(key);
+                msetArgs.add(val);
+                totalPairs++;
+            }
+
+            if (totalPairs == 0) {
+                resultLabel.setText("⚠️ 未解析到有效的键值对，请检查格式");
+                return;
+            }
+
+            try {
+                List<String> cmd = new ArrayList<>();
+                cmd.add("MSET");
+                cmd.addAll(msetArgs);
+                long inserted = (Long) sdk.sendCommand(cmd);
+                refreshKeysLater();
+                resultLabel.setText("✅ 成功写入 " + inserted + " 条" + (skipped > 0 ? "（跳过 " + skipped + " 行无效数据）" : ""));
+                consoleOutputArea.append("MSET 批量写入 " + inserted + " 条记录\n");
+            } catch (Exception ex) {
+                resultLabel.setText("❌ 写入失败: " + ex.getMessage());
+            }
+        });
+
+        cancelBtn.addActionListener(e -> dialog.dispose());
+        dialog.setVisible(true);
+    }
+
+    private void refreshKeysLater() {
+        SwingUtilities.invokeLater(this::handleRefreshKeys);
     }
 
     // ==========================================
