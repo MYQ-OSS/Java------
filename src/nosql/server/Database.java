@@ -375,6 +375,9 @@ public class Database implements AutoCloseable {
                 return (long) engine.dbSize();
             case "KEYS":
                 return new ArrayList<>(engine.keys());
+            case "DEBUG_READ":
+                if (cmd.size() < 2) return new ErrorResult("ERR wrong number of arguments for 'debug_read' command");
+                return engine.debugGet(cmd.get(1));
             case "FLUSHALL":
                 engine.clear();
                 return "OK";

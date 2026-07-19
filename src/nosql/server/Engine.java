@@ -895,4 +895,135 @@ public class Engine {
     public int getSSTableCount() { return sstables.size(); }
     public int getHashIndexSize() { return hashIndex.size(); }
     public int getMemTableSize() { return dbMap.size(); }
+
+    // ==========================================
+    // DEBUG_READ：带完整追踪的读路径（真实定时 + 真实路径）
+    // ==========================================
+
+    /**
+     * 逐级追踪真实读路径，返回每一步的耗时和命中信息
+     */
+    public List<String> debugGet(String key) {
+        List<String> trace = new ArrayList<>();
+
+        if (isExpired(key)) {
+            trace.add("[TTL 过期] Key \"" + key + "\" 已过期，自动删除");
+            trace.add("[结果] null");
+            return trace;
+        }
+
+        // ── L1 LRU 缓存 ──
+        long t0 = System.nanoTime();
+        DbValue l1Val = lruCache.get("default", key);
+        long t1 = System.nanoTime();
+        long l1us = (t1 - t0) / 1000;
+        if (l1Val != null) {
+            trace.add("[L1 LRU 缓存] 命中！(" + l1us + "μs)");
+            String val = l1Val.asString();
+            trace.add("[结果] \"" + truncate(val, 64) + "\" (" + val.length() + " chars)");
+            trace.add("[总耗时] " + l1us + "μs — 纯内存热数据");
+            cacheHits.incrementAndGet();
+            return trace;
+        }
+        trace.add("[L1 LRU 缓存] 未命中 (" + l1us + "μs)");
+
+        // ── L2 二级缓存 ──
+        t0 = System.nanoTime();
+        DbValue l2Val = l2Cache.get("default", key);
+        t1 = System.nanoTime();
+        long l2us = (t1 - t0) / 1000;
+        if (l2Val != null) {
+            trace.add("[L2 二级缓存] 命中！(" + l2us + "μs)");
+            // 回填 L1
+            lruCache.put("default", key, l2Val);
+            String val = l2Val.asString();
+            trace.add("[结果] \"" + truncate(val, 64) + "\" (" + val.length() + " chars)");
+            trace.add("[总耗时] " + (l1us + l2us) + "μs — L2 缓存热数据");
+            cacheHits.incrementAndGet();
+            return trace;
+        }
+        trace.add("[L2 二级缓存] 未命中 (" + l2us + "μs)");
+
+        // ── MemTable ──
+        t0 = System.nanoTime();
+        Object obj = dbMap.get(key);
+        t1 = System.nanoTime();
+        long memUs = (t1 - t0) / 1000;
+        if (obj != null) {
+            trace.add("[MemTable 内存表] 命中！(" + memUs + "μs) — 刚写入未刷盘");
+            String val = objectToString(obj);
+            DbValue dbVal = new DbValue(DbValue.Type.STRING, val);
+            lruCache.put("default", key, dbVal);
+            l2Cache.put("default", key, dbVal);
+            trace.add("[结果] \"" + truncate(val, 64) + "\" (" + val.length() + " chars)");
+            trace.add("[总耗时] " + (l1us + l2us + memUs) + "μs — MemTable 内存数据");
+            cacheMisses.incrementAndGet();
+            return trace;
+        }
+        trace.add("[MemTable 内存表] 未命中 (" + memUs + "μs)");
+
+        // ── HashIndex → SSTable ──
+        t0 = System.nanoTime();
+        HashIndex.IndexEntry idxEntry = hashIndex.get(key);
+        t1 = System.nanoTime();
+        long idxUs = (t1 - t0) / 1000;
+        if (idxEntry != null) {
+            trace.add("[HashIndex 内存索引] 命中！(" + idxUs + "μs) → SSTable: " + idxEntry.sstableFileName
+                    + ", 偏移量: 0x" + Long.toHexString(idxEntry.offset));
+
+            // 真实 SSTable 磁盘读取
+            long t2 = System.nanoTime();
+            try {
+                File sstFile = new File(dataDir, idxEntry.sstableFileName);
+                if (sstFile.exists()) {
+                    String diskVal = SSTable.read(sstFile, key);
+                    long t3 = System.nanoTime();
+                    long sstUs = (t3 - t2) / 1000;
+                    trace.add("[SSTable 磁盘读取] 二分查找 Index Block → seek 到 0x"
+                            + Long.toHexString(idxEntry.offset) + " → 读取 (" + sstUs + "μs, 文件大小 "
+                            + (sstFile.length() / 1024) + "KB)");
+
+                    if (diskVal != null) {
+                        // 回填 L1 + L2 + MemTable
+                        DbValue dbVal = new DbValue(DbValue.Type.STRING, diskVal);
+                        lruCache.put("default", key, dbVal);
+                        l2Cache.put("default", key, dbVal);
+                        dbMap.put(key, diskVal);
+                        trace.add("[结果] \"" + truncate(diskVal, 64) + "\" (" + diskVal.length() + " chars)");
+                        long totalUs = l1us + l2us + memUs + idxUs + sstUs;
+                        trace.add("[总耗时] " + totalUs + "μs (" + String.format("%.2f", totalUs / 1000.0) + "ms) — 磁盘冷数据，已回填各层缓存");
+                        sstableReads.incrementAndGet();
+                        return trace;
+                    }
+                } else {
+                    trace.add("[SSTable 磁盘读取] 文件不存在: " + idxEntry.sstableFileName);
+                }
+            } catch (IOException e) {
+                trace.add("[SSTable 磁盘读取] 错误: " + e.getMessage());
+            }
+            cacheMisses.incrementAndGet();
+        } else {
+            trace.add("[HashIndex 内存索引] 未命中 (" + idxUs + "μs)");
+        }
+
+        trace.add("[结果] null（键不存在）");
+        long totalUs = l1us + l2us + memUs + idxUs;
+        trace.add("[总耗时] " + totalUs + "μs");
+        return trace;
+    }
+
+    /** 截断长字符串用于展示 */
+    private static String truncate(String s, int maxLen) {
+        if (s == null) return null;
+        if (s.length() <= maxLen) return s;
+        return s.substring(0, maxLen) + "...(" + s.length() + " chars)";
+    }
+
+    public HashIndex getHashIndex() {
+        return hashIndex;
+    }
+
+    public File getDataDir() {
+        return dataDir;
+    }
 }

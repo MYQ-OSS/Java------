@@ -346,14 +346,13 @@ public class NoSqlGui {
         statsPanel.add(roleCard);
         dashboardPanel.add(statsPanel, BorderLayout.NORTH);
 
-        // A2. 中部拖拽分割区 (通过连环 JSplitPane，使折线图、测试仿真、终端均可调节大小)
+                // A2. 三区垂直分割布局（JSplitPane 嵌套，全部可拖拽，比例分配不挤压）
         // QPS 折线图卡片
         RoundedPanel chartCard = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
         chartCard.setLayout(new BorderLayout());
-        chartCard.setBorder(new EmptyBorder(18, 18, 18, 18));
-        chartCard.setMinimumSize(new Dimension(0, 130)); 
-        chartCard.setPreferredSize(new Dimension(0, 240));
-        
+        chartCard.setBorder(new EmptyBorder(18, 18, 12, 18));
+        chartCard.setMinimumSize(new Dimension(0, 100));
+
         JLabel chartTitle = new JLabel("实时数据库操作吞吐率 (QPS)");
         chartTitle.setForeground(COLOR_TEXT);
         chartTitle.setFont(FONT_BOLD);
@@ -364,10 +363,9 @@ public class NoSqlGui {
 
         // O(1) 磁盘 Seek 仿真测试卡片
         RoundedPanel seekCard = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
-        seekCard.setLayout(new BorderLayout(15, 12));
-        seekCard.setBorder(new EmptyBorder(18, 18, 18, 18));
-        seekCard.setMinimumSize(new Dimension(0, 130)); 
-        seekCard.setPreferredSize(new Dimension(0, 220)); 
+        seekCard.setLayout(new BorderLayout(15, 10));
+        seekCard.setBorder(new EmptyBorder(12, 18, 12, 18));
+        seekCard.setMinimumSize(new Dimension(0, 100));
 
         JLabel seekTitle = new JLabel("单机冷热数据 O(1) 磁盘 Seek 测试仿真");
         seekTitle.setForeground(COLOR_TEXT);
@@ -380,9 +378,9 @@ public class NoSqlGui {
         seekConsole.setFont(FONT_CODE);
         seekConsole.setEditable(false);
         seekConsole.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
-        
+
         JScrollPane seekScroll = new JScrollPane(seekConsole);
-        seekScroll.setBorder(new RoundedBorder(12, new Color(226, 232, 240))); 
+        seekScroll.setBorder(new RoundedBorder(12, new Color(226, 232, 240)));
         seekCard.add(seekScroll, BorderLayout.CENTER);
 
         JPanel seekCtrl = new JPanel(new BorderLayout(15, 0));
@@ -392,12 +390,12 @@ public class NoSqlGui {
         seekProgressBar.setFont(FONT_BOLD);
         seekProgressBar.setBackground(COLOR_BG);
         seekProgressBar.setForeground(COLOR_ACCENT);
-        
+
         startSeekBtn = new FlatButton("🚀 开启磁盘 O(1) Seek 仿真");
         startSeekBtn.setPreferredSize(new Dimension(250, 40));
         startSeekBtn.setThemeColors(new Color(254, 243, 199), new Color(253, 230, 138), new Color(252, 211, 77), new Color(180, 83, 9));
         startSeekBtn.setEnabled(false);
-        
+
         seekCtrl.add(seekProgressBar, BorderLayout.CENTER);
         seekCtrl.add(startSeekBtn, BorderLayout.EAST);
         seekCard.add(seekCtrl, BorderLayout.SOUTH);
@@ -406,10 +404,9 @@ public class NoSqlGui {
         RoundedPanel consoleCard = new RoundedPanel(16, COLOR_CARD, new Color(226, 232, 240));
         consoleCard.setLayout(new BorderLayout(5, 5));
         consoleCard.setBorder(new EmptyBorder(12, 18, 12, 18));
-        consoleCard.setMinimumSize(new Dimension(0, 110)); 
-        consoleCard.setPreferredSize(new Dimension(0, 200));
+        consoleCard.setMinimumSize(new Dimension(0, 100));
 
-        JLabel consoleTitle = new JLabel("📟 交互式 Redis 命令行终端");
+        JLabel consoleTitle = new JLabel("📟 交互式命令行终端");
         consoleTitle.setForeground(COLOR_ACCENT);
         consoleTitle.setFont(FONT_BOLD);
         consoleCard.add(consoleTitle, BorderLayout.NORTH);
@@ -421,9 +418,9 @@ public class NoSqlGui {
         consoleOutputArea.setEditable(false);
         consoleOutputArea.setText("Another Redis 交互式终端。连接服务端后，可输入原生 Redis 指令。\n\n");
         consoleOutputArea.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
-        
+
         JScrollPane consoleScroll = new JScrollPane(consoleOutputArea);
-        consoleScroll.setBorder(new RoundedBorder(12, new Color(226, 232, 240))); 
+        consoleScroll.setBorder(new RoundedBorder(12, new Color(226, 232, 240)));
         consoleCard.add(consoleScroll, BorderLayout.CENTER);
 
         consoleInputField = new FlatTextField("", 25);
@@ -432,23 +429,32 @@ public class NoSqlGui {
         consoleInputField.setEnabled(false);
         consoleCard.add(consoleInputField, BorderLayout.SOUTH);
 
-        // JSplitPane 垂直拖拽配置
+        // 连环 JSplitPane：三区垂直可拖拽，比例分配不挤压
         JSplitPane bottomSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, seekCard, consoleCard);
         bottomSplit.setBackground(COLOR_BG);
         bottomSplit.setOpaque(true);
-        bottomSplit.setDividerSize(8);
-        bottomSplit.setDividerLocation(230);
+        bottomSplit.setDividerSize(10);
+        bottomSplit.setResizeWeight(0.5);
         bottomSplit.setContinuousLayout(true);
         bottomSplit.setBorder(BorderFactory.createEmptyBorder());
 
         JSplitPane topSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, chartCard, bottomSplit);
         topSplit.setBackground(COLOR_BG);
         topSplit.setOpaque(true);
-        topSplit.setDividerSize(8);
-        topSplit.setDividerLocation(250);
+        topSplit.setDividerSize(10);
+        topSplit.setResizeWeight(0.5);
         topSplit.setContinuousLayout(true);
         topSplit.setBorder(BorderFactory.createEmptyBorder());
 
+        // 延迟到组件显示后根据实际高度设定初始比例（三等分）
+        SwingUtilities.invokeLater(() -> {
+            int h = dashboardPanel.getHeight() - statsPanel.getHeight() - 18;
+            if (h > 200) {
+                int third = h / 3;
+                topSplit.setDividerLocation(third);
+                bottomSplit.setDividerLocation(third);
+            }
+        });
         dashboardPanel.add(topSplit, BorderLayout.CENTER);
         rightMainPanel.add(dashboardPanel, "DASHBOARD");
 
@@ -1730,41 +1736,36 @@ public class NoSqlGui {
         
         new Thread(() -> {
             try {
-                String[] keys = {"user:1001", "product:902", "order:3319", "user:1002", "session:token", "config:sys"};
-                Random rand = new Random();
-                
-                for (int i = 0; i < 3; i++) {
-                    for (String k : keys) {
-                        int progress = 0;
-                        seekConsole.append(">> GET " + k + "\n");
-                        
-                        boolean hit = rand.nextBoolean();
-                        if (hit) {
-                            seekConsole.append("   [缓存命中] 成功在内存 LRU 缓存中预测命中 (O(1)). 耗时: 0.02ms\n\n");
-                            progress = 100;
-                            seekProgressBar.setValue(progress);
-                            Thread.sleep(300);
-                        } else {
-                            seekConsole.append("   [缓存未命中] 内存 LRU 缓存未命中，向磁盘存储引擎发起查询...\n");
-                            seekProgressBar.setValue(20);
-                            Thread.sleep(400);
-                            
-                            long offset = 120 + rand.nextInt(5000);
-                            seekConsole.append("   [O(1) 磁盘定位] 使用内存偏移量索引快速 Seek 磁盘物理位置: " + String.format("0x%04X", offset) + "...\n");
-                            seekProgressBar.setValue(60);
-                            Thread.sleep(500);
-                            
-                            seekConsole.append("   [磁盘读取] 从对应数据文件中拉取数据段，重新写入内存 LRU 缓存...\n");
-                            seekConsole.append("   [读取成功] 数据成功装载. 耗时: 1.25ms\n\n");
-                            seekProgressBar.setValue(100);
-                            Thread.sleep(300);
+                List<String> keys = (List<String>) sdk.sendCommand(List.of("KEYS", "*"));
+                if (keys == null || keys.isEmpty()) {
+                    seekConsole.append("数据库中没有数据，请先写入一些 key\n");
+                    return;
+                }
+                int total = keys.size();
+                seekConsole.append("共 " + total + " 个 key，开始真实读路径追踪\n");
+                seekConsole.append("=========================================\n\n");
+                for (int i = 0; i < total; i++) {
+                    String k = keys.get(i);
+                    long rtt0 = System.nanoTime();
+                    @SuppressWarnings("unchecked")
+                    List<String> trace = (List<String>) sdk.sendCommand(List.of("DEBUG_READ", k));
+                    long rtt1 = System.nanoTime();
+                    long rttUs = (rtt1 - rtt0) / 1000;
+                    seekConsole.append(">> GET " + k + " (网络 RTT: " + rttUs + "μs)\n");
+                    if (trace != null) {
+                        for (String line : trace) {
+                            seekConsole.append("   " + line + "\n");
                         }
                     }
+                    seekConsole.append("\n");
+                    int progress = (int) ((i + 1) * 100L / total);
+                    seekProgressBar.setValue(progress);
+                    Thread.sleep(250);
                 }
                 seekConsole.append("=========================================\n");
-                seekConsole.append(" 磁盘 O(1) Seek 仿真测试全部完成！\n");
+                seekConsole.append(" 磁盘 O(1) Seek 真实追踪测试全部完成！共 " + total + " 个 key\n");
                 seekConsole.append("=========================================\n");
-            } catch (InterruptedException ex) {
+            } catch (Exception ex) {
                 ex.printStackTrace();
             } finally {
                 startSeekBtn.setEnabled(true);
@@ -1885,17 +1886,17 @@ public class NoSqlGui {
     }
 
     private RoundedPanel createStatCard(String title, JLabel valueLabel, Color bg, Color border) {
-        RoundedPanel card = new RoundedPanel(16, bg, border); 
-        card.setLayout(new BorderLayout(8, 8)); 
-        card.setBorder(new EmptyBorder(15, 20, 15, 20)); 
-        
+        RoundedPanel card = new RoundedPanel(16, bg, border);
+        card.setLayout(new BorderLayout(6, 6));
+        card.setBorder(new EmptyBorder(12, 16, 12, 16));
+
         JLabel titleLabel = new JLabel(title);
         titleLabel.setForeground(COLOR_MUTED);
-        titleLabel.setFont(FONT_BOLD); 
-        
+        titleLabel.setFont(new Font("Microsoft YaHei", Font.BOLD, 13));
+
         valueLabel.setForeground(COLOR_TEXT);
-        valueLabel.setFont(new Font("Fira Code", Font.BOLD, 28)); 
-        
+        valueLabel.setFont(new Font("Fira Code", Font.BOLD, 22));
+
         card.add(titleLabel, BorderLayout.NORTH);
         card.add(valueLabel, BorderLayout.CENTER);
         return card;
