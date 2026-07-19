@@ -654,6 +654,155 @@ public class ClusterManager implements Closeable {
         return lastLogIndex.get();
     }
 
+    // ════════════════════════════════════════════════════════════
+    // 动态节点加入
+    // ════════════════════════════════════════════════════════════
+
+    /**
+     * 获取当前节点 IP 地址
+     */
+    private String getLocalAddress() {
+        try {
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (Exception e) {
+            return "127.0.0.1";
+        }
+    }
+
+    /**
+     * 获取包含自身的完整 peer 列表字符串
+     * 格式: "node_1=127.0.0.1:8081,node_2=127.0.0.1:8082,..."
+     */
+    public String getPeersAsString() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(nodeId).append("=").append(getLocalAddress()).append(":").append(port);
+        for (Map.Entry<String, String> peer : peers.entrySet()) {
+            sb.append(",").append(peer.getKey()).append("=").append(peer.getValue());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 添加一个新 peer 到本地集群成员列表
+     */
+    public synchronized void addPeer(String newNodeId, String newAddress) {
+        if (newNodeId.equals(nodeId)) return; // 不添加自己
+        peers.put(newNodeId, newAddress);
+        System.out.println("[Cluster] Peer added: " + newNodeId + "=" + newAddress
+                + " (total peers: " + peers.size() + ")");
+    }
+
+    /**
+     * 处理 CLUSTER_JOIN 请求（管理员添加新节点）
+     *
+     * 如果当前是 Leader：添加 peer → 广播给所有节点 → 返回完整 peer 列表
+     * 如果当前是 Follower：转发给 Leader
+     *
+     * @return RESP 响应列表，首元素为状态 ("OK" / "ERR")
+     */
+    public synchronized List<String> handleJoinRequest(List<String> cmd) {
+        if (cmd.size() < 3) {
+            return List.of("ERR", "Missing parameters. Usage: CLUSTER_JOIN nodeId=ip:port");
+        }
+
+        String newPeerEntry = cmd.get(1); // "node_4=127.0.0.1:8084"
+        String[] kv = newPeerEntry.split("=");
+        if (kv.length != 2 || kv[0].isEmpty() || kv[1].isEmpty()) {
+            return List.of("ERR", "Invalid format, expected nodeId=ip:port");
+        }
+        String newNodeId = kv[0].trim();
+        String newAddress = kv[1].trim();
+
+        // 检查是否已存在
+        if (peers.containsKey(newNodeId)) {
+            return List.of("ERR", "Node already exists: " + newNodeId);
+        }
+        if (newNodeId.equals(nodeId)) {
+            return List.of("ERR", "Cannot add self as peer");
+        }
+
+        if (currentRole == Role.LEADER) {
+            // 1. Leader 添加新节点
+            addPeer(newNodeId, newAddress);
+
+            // 2. 广播 CLUSTER_PEER_JOIN 给所有现有 peer（通知有新节点加入）
+            List<String> broadcastCmd = List.of("CLUSTER_PEER_JOIN", newPeerEntry);
+            for (String addr : peers.values()) {
+                if (addr.equals(newAddress)) continue; // 新节点单独发完整列表
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        sendCommandToPeer(addr, broadcastCmd, false);
+                    } catch (Exception ignored) {}
+                });
+            }
+
+            // 3. 单独发给新节点完整 peer 列表
+            String fullPeerList = getPeersAsString();
+            CompletableFuture.runAsync(() -> {
+                try {
+                    sendCommandToPeer(newAddress, List.of("CLUSTER_PEER_LIST", fullPeerList), false);
+                } catch (Exception ignored) {}
+            });
+
+            System.out.println("[Cluster] New node joined the cluster: " + newPeerEntry
+                    + " (full peer list: " + fullPeerList + ")");
+
+            // 3. 返回完整 peer 列表（含自身）
+            return List.of("OK", getPeersAsString());
+        }
+
+        // Follower：转发给 Leader
+        if (leaderId != null) {
+            String leaderAddr = peers.get(leaderId);
+            if (leaderAddr != null) {
+                try {
+                    return sendCommandToPeer(leaderAddr, cmd, true);
+                } catch (Exception e) {
+                    return List.of("ERR", "Forward to Leader failed: " + e.getMessage());
+                }
+            }
+        }
+        return List.of("ERR", "No Leader available");
+    }
+
+    /**
+     * 处理 Leader 广播的 CLUSTER_PEER_JOIN（单个新节点加入通知）
+     */
+    public synchronized void handlePeerJoinBroadcast(List<String> cmd) {
+        if (cmd.size() < 2) return;
+        String peerEntry = cmd.get(1); // "node_4=127.0.0.1:8084"
+        String[] kv = peerEntry.split("=");
+        if (kv.length == 2) {
+            addPeer(kv[0].trim(), kv[1].trim());
+        }
+    }
+
+    /**
+     * 处理 Leader 单独发送的 CLUSTER_PEER_LIST（完整 peer 列表，新节点接收）
+     * 用收到的完整列表替换本地 peers，让新节点知道集群所有成员
+     */
+    public synchronized void handlePeerListBroadcast(List<String> cmd) {
+        if (cmd.size() < 2) return;
+        String peerListStr = cmd.get(1); // "node_1=ip:port,node_2=ip:port,node_3=ip:port,..."
+        String[] entries = peerListStr.split(",");
+        int added = 0;
+        for (String entry : entries) {
+            String[] kv = entry.split("=");
+            if (kv.length == 2) {
+                String id = kv[0].trim();
+                String addr = kv[1].trim();
+                if (!id.equals(nodeId) && !peers.containsKey(id)) {
+                    peers.put(id, addr);
+                    added++;
+                }
+            }
+        }
+        if (added > 0) {
+            System.out.println("[Cluster] Learned " + added + " peer(s) from Leader: "
+                    + peerListStr + " (total peers: " + peers.size() + ")");
+        }
+    }
+
     @Override
     public synchronized void close() {
         scheduler.shutdown();

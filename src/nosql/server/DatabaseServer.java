@@ -215,6 +215,30 @@ public class DatabaseServer implements AutoCloseable {
                     continue;
                 }
 
+                if ("CLUSTER_JOIN".equals(action)) {
+                    if (clusterManager != null) {
+                        List<String> joinResp = clusterManager.handleJoinRequest(cmd);
+                        RespParser.writeArray(out, joinResp);
+                    } else {
+                        RespParser.writeError(out, "ERR Not in cluster mode");
+                    }
+                    continue;
+                }
+
+                if ("CLUSTER_PEER_JOIN".equals(action)) {
+                    if (clusterManager != null) {
+                        clusterManager.handlePeerJoinBroadcast(cmd);
+                    }
+                    continue;
+                }
+
+                if ("CLUSTER_PEER_LIST".equals(action)) {
+                    if (clusterManager != null) {
+                        clusterManager.handlePeerListBroadcast(cmd);
+                    }
+                    continue;
+                }
+
                 // ==========================================
                 // 2. 路由常规 Redis 命令
                 // ==========================================
