@@ -180,6 +180,90 @@ public class AofManager implements Closeable {
         }
     }
 
+    /**
+     * AOF 重写（Rewrite）—— 将 FlushSnapshot 中的内存数据压缩为最小 AOF，清理历史段文件
+     *
+     * 流程：
+     *   ① 遍历快照中所有 key，按类型写出 SET / RPUSH / SADD / HSET + EXPIRE 命令到临时文件
+     *   ② 删除所有旧归档段 aof_segment_*.aof.zip
+     *   ③ 关闭 active.aof → 临时文件替换为新的 active.aof → 重新打开
+     *
+     * 这个版本直接从 flush 前捕获的 dbMap 快照中读取数据，纯内存操作，不走引擎读路径。
+     */
+    public synchronized void rewrite(Map<String, Object> dbSnapshot, Map<String, Long> expireSnapshot) throws IOException {
+        long t0 = System.currentTimeMillis();
+        File tmpFile = new File(dataDir, "active.aof.tmp");
+
+        // 1. 遍历快照中所有 key，写出 RESP 命令（纯内存操作，无磁盘读）
+        try (FileOutputStream fos = new FileOutputStream(tmpFile)) {
+            for (Map.Entry<String, Object> entry : dbSnapshot.entrySet()) {
+                String key = entry.getKey();
+                Object val = entry.getValue();
+                Long expireTime = expireSnapshot.get(key);
+                boolean hasTtl = expireTime != null;
+                long ttlSeconds = hasTtl ? (expireTime - System.currentTimeMillis()) / 1000L : 0;
+
+                // 已在清空前捕获，不可能是 String 以外的类型，但用 instanceof 判断是安全的
+                if (val instanceof String) {
+                    String strVal = (String) val;
+                    List<String> cmd = new ArrayList<>(List.of("SET", key, strVal));
+                    if (hasTtl && ttlSeconds > 0) { cmd.add("EX"); cmd.add(String.valueOf(ttlSeconds)); }
+                    RespParser.writeArray(fos, cmd);
+                } else if (val instanceof java.util.concurrent.ConcurrentLinkedDeque) {
+                    @SuppressWarnings("unchecked")
+                    java.util.concurrent.ConcurrentLinkedDeque<String> deque =
+                            (java.util.concurrent.ConcurrentLinkedDeque<String>) val;
+                    for (String item : deque) {
+                        RespParser.writeArray(fos, List.of("RPUSH", key, item));
+                    }
+                    if (hasTtl && ttlSeconds > 0) {
+                        RespParser.writeArray(fos, List.of("EXPIRE", key, String.valueOf(ttlSeconds)));
+                    }
+                } else if (val instanceof java.util.Set) {
+                    @SuppressWarnings("unchecked")
+                    java.util.Set<String> set = (java.util.Set<String>) val;
+                    for (String member : set) {
+                        RespParser.writeArray(fos, List.of("SADD", key, member));
+                    }
+                    if (hasTtl && ttlSeconds > 0) {
+                        RespParser.writeArray(fos, List.of("EXPIRE", key, String.valueOf(ttlSeconds)));
+                    }
+                } else if (val instanceof java.util.concurrent.ConcurrentHashMap) {
+                    @SuppressWarnings("unchecked")
+                    java.util.concurrent.ConcurrentHashMap<String, String> map =
+                            (java.util.concurrent.ConcurrentHashMap<String, String>) val;
+                    for (Map.Entry<String, String> e : map.entrySet()) {
+                        RespParser.writeArray(fos, List.of("HSET", key, e.getKey(), e.getValue()));
+                    }
+                    if (hasTtl && ttlSeconds > 0) {
+                        RespParser.writeArray(fos, List.of("EXPIRE", key, String.valueOf(ttlSeconds)));
+                    }
+                }
+            }
+            fos.flush();
+        }
+
+        // 2. 删除所有旧 AOF 归档段
+        File[] oldSegments = dataDir.listFiles((dir, name) ->
+                name.startsWith("aof_segment_") && name.endsWith(".aof.zip"));
+        if (oldSegments != null) {
+            for (File seg : oldSegments) {
+                seg.delete();
+            }
+        }
+
+        // 3. 关闭当前 active.aof，替换为新的
+        activeFos.close();
+        activeFile.delete();
+        tmpFile.renameTo(activeFile);
+        initActiveFile();
+
+        long elapsed = System.currentTimeMillis() - t0;
+        System.out.println("[AOF] Rewrite completed: " + dbSnapshot.size()
+                + " keys, " + activeFile.length() + " bytes, took " + elapsed + "ms ("
+                + (oldSegments != null ? oldSegments.length : 0) + " old segments cleaned)");
+    }
+
     @Override
     public synchronized void close() throws IOException {
         if (activeFos != null) {

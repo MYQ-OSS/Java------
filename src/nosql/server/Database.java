@@ -4,6 +4,7 @@ import nosql.common.DbValue;
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 数据库业务中央管理器，整合 LSMT Engine 与 AOF 持久化存储
@@ -26,7 +27,8 @@ public class Database implements AutoCloseable {
     }
 
     public interface ReplicationListener {
-        void onReplicate(List<String> cmd);
+        /** @return true = 复制达到多数派确认，false = 复制失败 */
+        boolean onReplicate(List<String> cmd);
     }
 
     public Database(String dbDir, long rotateThreshold) throws Exception {
@@ -37,6 +39,18 @@ public class Database implements AutoCloseable {
 
         this.engine = new Engine(dir);
         this.aofManager = new AofManager(dbDir, rotateThreshold);
+
+        // 注册刷写回调：MemTable flush 到 SSTable 后，后台异步重写 AOF 清理历史段
+        // 回调收到的是 flush 前捕获的 dbMap 快照，纯内存操作，不走引擎读路径
+        this.engine.setPostFlushCallback((Engine.FlushSnapshot snapshot) -> {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    aofManager.rewrite(snapshot.getData(), snapshot.getExpires());
+                } catch (Exception e) {
+                    System.err.println("[AOF] Rewrite after flush failed: " + e.getMessage());
+                }
+            });
+        });
 
         // 重启恢复：扫描并重放 AOF 文件中的所有历史命令
         recover();
@@ -208,9 +222,12 @@ public class Database implements AutoCloseable {
             return new ErrorResult(e.getMessage());
         }
 
-        // 3. 如果是写指令且当前是 Leader，触发主从复制广播
+        // 3. 如果是写指令且当前是 Leader，触发主从同步复制（等待多数派确认）
         if (isWrite && replicate && replicationListener != null) {
-            replicationListener.onReplicate(cmd);
+            boolean replicated = replicationListener.onReplicate(cmd);
+            if (!replicated) {
+                return new ErrorResult("ERR write failed to replicate to majority of nodes");
+            }
         }
 
         return result;

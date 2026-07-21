@@ -194,7 +194,14 @@ public class DatabaseServer implements AutoCloseable {
 
                 if ("CLUSTER_REPLICATE".equals(action)) {
                     if (clusterManager != null) {
-                        clusterManager.handleReplicationPacket(cmd);
+                        try {
+                            clusterManager.handleReplicationPacket(cmd);
+                            RespParser.writeSimpleString(out, "OK");
+                        } catch (Exception e) {
+                            RespParser.writeError(out, e.getMessage());
+                        }
+                    } else {
+                        RespParser.writeError(out, "ERR Not in cluster mode");
                     }
                     continue;
                 }

@@ -36,10 +36,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *     - joinAndSyncData()        → 新节点主动发 CLUSTER_SYNC 请求全量快照
  *     - handleSyncJoinRequest()  → Leader 遍历所有数据生成快照返回
  *
- * 【冲突六（已知未处理）】Leader 刚写完就崩溃，数据未同步到 Follower
- *   位置：
- *     - broadcastReplication()   → 使用 CompletableFuture.runAsync 异步广播，不等待 Follower 确认
- *   说明：这是简化版 Raft 的取舍——追求性能，牺牲强一致性。真正的 Raft 需要等过半 Follower 确认。
+ * 【冲突六（已修复）】Leader 刚写完就崩溃，数据未同步到 Follower
+ *   修复：
+ *     - broadcastReplication()   → 改为同步等待，发送 CLUSTER_REPLICATE + 等回复
+ *     - 过半数 Follower 确认后才返回成功，未达到多数派则写操作被拒绝
+ *     代价：每次写都要等网络往返，延迟升高但保证了数据不丢
  * ============================================================
  *
  * 集群中另外两个冲突在其他文件中处理：
@@ -93,13 +94,15 @@ public class ClusterManager implements Closeable {
         // ============================================================
         // 绑定主节点写指令复制监听器
         // 当 Database.execute() 执行完一条写命令后，会回调这个 Listener
-        // Leader 收到回调 → broadcastReplication() → 异步发给所有 Follower
+        // Leader 收到回调 → broadcastReplication() → 同步等待多数派确认
+        // 返回 false → execute() 返回错误给客户端
         // ============================================================
         this.database.setReplicationListener(cmd -> {
             if (currentRole == Role.LEADER) {
-                lastLogIndex.incrementAndGet(); // 写命令递增日志索引
-                broadcastReplication(cmd);
+                lastLogIndex.incrementAndGet();
+                return broadcastReplication(cmd);
             }
+            return true; // Follower/Standalone 不需要复制
         });
     }
 
@@ -512,42 +515,63 @@ public class ClusterManager implements Closeable {
     }
 
     // ════════════════════════════════════════════════════════════
-    // 冲突六（已知未处理）：Leader 广播复制数据（异步，可能丢数据）
+    // 冲突六（已修复）：主从复制 —— 同步等待多数派确认（强一致性）
     // ════════════════════════════════════════════════════════════
 
     /**
-     * 【冲突六（已知未处理）】Leader 广播写操作指令给所有 Follower
+     * 【冲突六（已修复）】Leader 同步复制写操作指令给所有 Follower
      *
-     * 这是整个项目在一致性方面最大的简化：
+     * 改为强一致性策略：
+     *   ① Leader 向所有 Follower 并发发送 CLUSTER_REPLICATE
+     *   ② 每个 Follower 收到后执行命令，回复 "OK"
+     *   ③ Leader 等待所有回复（2 秒超时）
+     *   ④ 统计确认数是否达到过半数
+     *   ⑤ 未达到过半数 → 返回 false → execute() 拒绝本次写操作
      *
-     * 当前做法（异步复制）：
-     *   CompletableFuture.runAsync() → 发完就不管了 → 不等待 Follower 确认
-     *   Leader 写完立刻返回 "OK" 给客户端 → 高性能
-     *   风险：如果 Leader 在广播完成前崩溃，Follower 没收到这条数据
-     *         新 Leader（从 Follower 选出的）没有这条数据 → 数据丢失
-     *
-     * 真正的 Raft 做法（同步复制）：
-     *   Leader 必须等过半 Follower 确认收到并写入后，才返回 "OK" 给客户端
-     *   int confirmed = 1;
-     *   for (Follower f : peers) { if (f.replicateAndWait(cmd)) confirmed++; }
-     *   if (confirmed >= majority) return "OK";
-     *   代价：每次写都要等网络往返 → 延迟高
-     *
-     * 项目选择了"异步"方案，牺牲了强一致性换取了性能。
+     * 代价：每次写都要等网络往返 → 延迟升高，但保证了数据不丢
      */
-    private void broadcastReplication(List<String> cmd) {
+    private boolean broadcastReplication(List<String> cmd) {
         List<String> repCmd = new ArrayList<>();
         repCmd.add("CLUSTER_REPLICATE");
         repCmd.addAll(cmd);
 
+        int ackCount = 1; // Leader 本地已写入成功
+        int majority = (peers.size() + 1) / 2 + 1;
+        java.util.concurrent.ConcurrentHashMap<String, Boolean> acks = new java.util.concurrent.ConcurrentHashMap<>();
+
+        // 并发向所有 Follower 发送复制命令
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (String address : peers.values()) {
-            // 【冲突六】异步发送，不等待 Follower 确认 → 可能丢数据
-            CompletableFuture.runAsync(() -> {
+            futures.add(CompletableFuture.runAsync(() -> {
                 try {
-                    sendCommandToPeer(address, repCmd, false);  // false = 不等回复
+                    List<String> resp = sendCommandToPeer(address, repCmd, true);
+                    if (resp != null && !resp.isEmpty() && "OK".equals(resp.get(0))) {
+                        acks.put(address, true);
+                    }
                 } catch (Exception ignored) {}
-            });
+            }));
         }
+
+        // 等待所有 Follower 回复（最多 2 秒超时）
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .get(2000, TimeUnit.MILLISECONDS);
+        } catch (Exception ignored) {}
+
+        // 统计确认数
+        for (String addr : peers.values()) {
+            if (acks.containsKey(addr)) ackCount++;
+        }
+
+        boolean majorityAchieved = ackCount >= majority;
+        if (!majorityAchieved) {
+            System.err.println("[Cluster] !!! CRITICAL: Replication only got " + ackCount
+                    + "/" + majority + " acks! Write will be rejected.");
+        } else {
+            System.out.println("[Cluster] Replication confirmed: " + ackCount
+                    + "/" + majority + " acks achieved.");
+        }
+        return majorityAchieved;
     }
 
     // ════════════════════════════════════════════════════════════

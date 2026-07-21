@@ -76,10 +76,10 @@ src/nosql/
 - **选举**：随机超时 1500~3000ms → 过期发起选举 → 过半数 (`(peers+1)/2+1`) 晋升 Leader
 - **心跳**：Leader 每秒广播 → Follower 收到后重置选举计时器
 - **Term 比较**：term 小的消息被忽略，term 大的无条件承认（防止旧 Leader 复活）
-- **主从复制**：**异步广播**（`CompletableFuture.runAsync`），不等待 Follower 确认 → 牺牲强一致性换性能
+- **主从复制**：**同步广播**，发送 `CLUSTER_REPLICATE` 后等待所有 Follower 回复，过半数确认才返回成功 → 牺牲性能换强一致性
 - **新节点同步**：启动 1.2s 后发 `CLUSTER_SYNC` 拉全量快照回放
 
-### 写操作冲突处理（5 个关键位置）
+### 写操作冲突处理（6 个关键位置）
 
 | 冲突 | 处理位置 | 策略 |
 |------|---------|------|
@@ -88,6 +88,7 @@ src/nosql/
 | 旧 Leader 复活 | `ClusterManager.handleHeartbeatPacket()` | term 比较降级 |
 | 并发写同一 Key | `Database.execute()` 的 `synchronized` | 全局锁串行化 |
 | 写操作到 Follower | `DatabaseServer.isWritable()` | 直接拒绝 + 返回错误 |
+| Leader 崩溃丢数据 | `broadcastReplication()` | 同步等待多数派确认，未达到则拒绝写 |
 
 ### Database.execute() 写流程
 
@@ -95,7 +96,8 @@ src/nosql/
 synchronized execute(cmd, replicate=true):
   1. AOF 追加 (aofManager.append)
   2. 内存执行 (dispatchCommand → Engine)
-  3. 集群广播 (replicationListener.onReplicate → 异步发送 CLUSTER_REPLICATE)
+  3. 同步复制 (replicationListener.onReplicate → 发送 CLUSTER_REPLICATE 等待多数派确认)
+     → 未达多数派：返回 ERR，客户端重试
 ```
 
 ### 服务端长连接模型

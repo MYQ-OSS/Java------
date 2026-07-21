@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 /**
  * 兼容 Redis 核心数据类型及 TTL 过期策略的 LSMT 内存+磁盘混合数据库引擎
@@ -39,6 +40,25 @@ public class Engine {
 
     // Collection 元数据：明确跟踪用户创建的集合
     private final Set<String> collectionNames = ConcurrentHashMap.newKeySet();
+
+    // 刷写完成回调（用于触发 AOF rewrite，携带 dbMap 快照）
+    private Consumer<FlushSnapshot> postFlushCallback;
+
+    /**
+     * MemTable 刷写时的数据快照，在 dbMap.clear() 前捕获，传递给 AOF rewrite
+     */
+    public static class FlushSnapshot {
+        private final Map<String, Object> data;       // dbMap 的深拷贝
+        private final Map<String, Long> expires;       // expireMap 的深拷贝
+
+        FlushSnapshot(Map<String, Object> data, Map<String, Long> expires) {
+            this.data = data;
+            this.expires = expires;
+        }
+
+        public Map<String, Object> getData() { return data; }
+        public Map<String, Long> getExpires() { return expires; }
+    }
 
     // 读写统计
     private final AtomicInteger cacheHits = new AtomicInteger(0);
@@ -149,6 +169,9 @@ public class Engine {
                 // 持久化哈希索引
                 saveHashIndex();
             }
+            // ★★★ 在清空 dbMap 之前捕获快照，用于 AOF rewrite ★★★
+            FlushSnapshot snapshot = new FlushSnapshot(new HashMap<>(dbMap), new HashMap<>(expireMap));
+
             // 清空 MemTable（但保留过期时间映射以支持 SSTable 数据的 TTL）
             dbMap.clear();
             System.out.println("[Engine] MemTable flushed. HashIndex size: " + hashIndex.size());
@@ -157,9 +180,18 @@ public class Engine {
             if (sstables.size() >= 3) {
                 triggerCompaction();
             }
+            // 触发后置回调（AOF rewrite 等），传入快照而非读引擎
+            if (postFlushCallback != null) {
+                postFlushCallback.accept(snapshot);
+            }
         } catch (IOException e) {
             System.err.println("[Engine] Failed to flush MemTable to SSTable: " + e.getMessage());
         }
+    }
+
+    /** 注册刷写完成回调（Database 用来触发 AOF rewrite） */
+    public void setPostFlushCallback(Consumer<FlushSnapshot> callback) {
+        this.postFlushCallback = callback;
     }
 
     private void saveHashIndex() {
